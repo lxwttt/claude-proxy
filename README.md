@@ -56,7 +56,6 @@ paths:
 
 ports:
   proxy_port: 8899                            # 转发代理端口
-  clash_proxy_port: 21882                     # 代理软件端口
 
 app:
   app_id: "Claude_pzs8sxrjxfjjc!Claude"      # Claude 的 App User Model ID（可选）

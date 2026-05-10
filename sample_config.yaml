@@ -6,7 +6,6 @@ paths:
 
 ports:
   proxy_port: 8899 # 转发代理监听端口
-  clash_proxy_port: 21882 # 代理软件的监听端口，需与 proxy_settings 中的端口一致
 
 app:
   app_id: "" # Claude 的 App User Model ID（可选，二选一，建议使用）
