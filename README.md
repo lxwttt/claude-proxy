@@ -194,6 +194,36 @@ python launch.py
 `config.yaml` 中支持两种方式，按优先级：
 
 1. `app.app_id` — Windows App User Model ID（推荐，稳定）
-   - 可通过 `Get-StartApps | Where-Object { $_.Name -like "*Claude*" }` 在 PowerShell 中查询
-2. `paths.claude_exe` — Claude EXE 的绝对路径
-   - 如果只填此项，`app_id` 留空即可
+2. `paths.claude_exe` — Claude EXE 的绝对路径（不推荐，可能因更新导致路径失效）
+
+### 查询 Claude 的 App User Model ID
+
+Claude 桌面版通常通过 Windows 应用商店／Sparse 包安装，路径会随版本变化。推荐使用 App User Model ID 启动，不受更新影响。
+
+在 **PowerShell** 中执行以下命令查询：
+
+```powershell
+Get-StartApps | Where-Object { $_.Name -like "*Claude*" }
+```
+
+输出示例：
+
+```
+AppID                                    Name
+-----                                    ----
+Claude_pzs8sxrjxfjjc!Claude             Claude
+```
+
+将输出的 `AppID`（如 `Claude_pzs8sxrjxfjjc!Claude`）填入 `config.yaml` 的 `app.app_id` 字段即可。
+
+如果未查到结果，可尝试模糊搜索：
+
+```powershell
+Get-StartApps | Where-Object { $_.Name -match "Claude|claude" } | Format-List
+```
+
+或列出全部已安装应用，手工查找：
+
+```powershell
+Get-StartApps | Out-GridView
+```
