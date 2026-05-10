@@ -28,13 +28,11 @@ local_proxy.py  (运行在 127.0.0.1:8899)
 
 ## 文件结构
 
-| 文件 | 作用 |
-| -- | -- |
-| `launch.py` | 主启动器 — 负责启动 EXE、挂代理、启动转发代理、启动 Claude |
-| `local_proxy.py` | API 转发代理 — 接收 Claude 请求并转发到第三方 API |
-| `config.yaml` | 启动器配置 — Python 路径、代理端口、额外 EXE 等 |
-| `model_config.yaml` | 模型映射配置 — 选择后端 API 和模型映射规则 |
-| `start_claude.cmd` | Windows 入口批处理文件 |
+- `launch.py` — 主启动器，负责启动 EXE、挂代理、启动转发代理、启动 Claude
+- `local_proxy.py` — API 转发代理，接收 Claude 请求并转发到第三方 API
+- `config.yaml` — 启动器配置，Python 路径、代理端口、额外 EXE 等
+- `model_config.yaml` — 模型映射配置，选择后端 API 和模型映射规则
+- `start_claude.cmd` — Windows 入口批处理文件
 
 ## 前置条件
 
