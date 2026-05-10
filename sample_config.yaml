@@ -20,9 +20,9 @@ debug:
   enabled: true
 
 extra_exes:
-  - name: "MyProxy" # 显示名称
-    path: "C:/path/to/proxy.exe" # EXE 路径
-    args: "" # 启动参数
-    wait_for_port: 21882 # 等待此端口就绪后继续
-    description: "代理软件" # 描述
-    required: true # true=启动失败则退出
+  # - name: "MyProxy" # 显示名称
+  #   path: "C:/path/to/proxy.exe" # EXE 路径
+  #   args: "" # 启动参数
+  #   wait_for_port: 21882 # 等待此端口就绪后继续
+  #   description: "代理软件" # 描述
+  #   required: true # true=启动失败则退出
