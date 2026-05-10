@@ -8,7 +8,7 @@
 2. **挂载系统代理** — 设置 `HTTP_PROXY` / `HTTPS_PROXY` 环境变量，使 Claude 的流量经过代理
 3. **启动 API 转发代理** — 将 Claude 客户端的 API 请求转发到第三方后端（DeepSeek / OpenAI 等），并自动完成模型名称映射
 4. **启动 Claude 桌面版** — 以上所有就绪后自动拉起 Claude 应用
-5. **优雅退出** — Ctrl+C 后按逆序停止所有进程
+5. **退出** — Ctrl+C 后按逆序停止所有进程
 
 ## 架构
 
@@ -30,13 +30,13 @@
 
 ## 文件结构
 
-| 文件 | 作用 |
-|---|---|
-| `launch.py` | 主启动器 — 负责启动 EXE、挂代理、启动转发代理、启动 Claude |
-| `local_proxy.py` | API 转发代理 — 接收 Claude 请求并转发到第三方 API |
-| `config.yaml` | 启动器配置 — Python 路径、代理端口、额外 EXE 等 |
-| `model_config.yaml` | 模型映射配置 — 选择后端 API 和模型映射规则 |
-| `start_claude.cmd` | Windows 入口批处理文件 |
+| 文件                | 作用                                                       |
+| ------------------- | ---------------------------------------------------------- |
+| `launch.py`         | 主启动器 — 负责启动 EXE、挂代理、启动转发代理、启动 Claude |
+| `local_proxy.py`    | API 转发代理 — 接收 Claude 请求并转发到第三方 API          |
+| `config.yaml`       | 启动器配置 — Python 路径、代理端口、额外 EXE 等            |
+| `model_config.yaml` | 模型映射配置 — 选择后端 API 和模型映射规则                 |
+| `start_claude.cmd`  | Windows 入口批处理文件                                     |
 
 ## 前置条件
 
