@@ -8,6 +8,12 @@ import sys
 import traceback
 import os
 
+# ========== 修复 stdout 编码，避免重定向到文件时中文乱码 ==========
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
+
 # ========== 全局变量 ==========
 current_config = {}
 # 自动获取与脚本同路径下的 model_config.yaml

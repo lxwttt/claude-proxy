@@ -15,12 +15,33 @@ import threading
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
-# 设置日志
+# ========== 修复 stdout/stderr 编码，避免重定向到文件时中文乱码 ==========
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
+
+# ========== 自动文件日志 + 控制台输出 ==========
+_log_dir = Path(__file__).parent / "logs"
+_log_dir.mkdir(exist_ok=True)
+_log_file = _log_dir / f"launcher_{time.strftime('%Y%m%d')}.log"
+
+_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+
+# 控制台 handler（stderr）
+_console_handler = logging.StreamHandler(sys.stderr)
+_console_handler.setFormatter(_formatter)
+
+# 文件 handler（UTF-8，每日追加）
+_file_handler = logging.FileHandler(_log_file, encoding='utf-8')
+_file_handler.setFormatter(_formatter)
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    handlers=[_console_handler, _file_handler],
 )
 logger = logging.getLogger(__name__)
+logger.info(f"日志文件: {_log_file}")
 
 class ExtraExeManager:
     """管理额外需要启动的EXE程序"""
