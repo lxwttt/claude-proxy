@@ -7,7 +7,6 @@ Claude Auto-Launcher - 支持额外EXE启动的版本
 import os
 import sys
 import time
-import re
 import yaml
 import subprocess
 import socket
@@ -202,7 +201,7 @@ class ClaudeLauncher:
         try:
             result = subprocess.run(
                 ['wsl', '--status'],
-                capture_output=True, text=True, timeout=10
+                capture_output=True, encoding='utf-8', errors='replace', timeout=10
             )
             if result.returncode == 0:
                 status_line = result.stdout.split('\n')[0] if result.stdout else ''
@@ -220,7 +219,7 @@ class ClaudeLauncher:
         try:
             result = subprocess.run(
                 ['wsl', '--cd', '~', '-e', 'true'],
-                capture_output=True, text=True, timeout=30
+                capture_output=True, encoding='utf-8', errors='replace', timeout=30
             )
             if result.returncode == 0:
                 logger.info("WSL 已成功启动")
@@ -255,35 +254,12 @@ class ClaudeLauncher:
             logger.info(f"   Python: {python_path}")
             logger.info(f"   脚本: {proxy_script}")
 
-            # 代理输出重定向到独立日志文件
-            proxy_log = _log_dir / f"proxy_{time.strftime('%Y%m%d')}.log"
-            proxy_fh = open(proxy_log, 'a', encoding='utf-8')
-            logger.info(f"   代理日志: {proxy_log}")
-
             self.proxy_process = subprocess.Popen(
                 [python_path, proxy_script],
                 cwd=str(Path(proxy_script).parent),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,  # stderr 合并到 stdout
-                text=True
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
             )
-
-            # 后台读取线程：全部写入日志，关键错误同时打印到控制台
-            def pipe_reader(stream, fh):
-                for line in iter(stream.readline, ''):
-                    fh.write(line)
-                    fh.flush()
-                    # 关键错误同时输出到控制台
-                    if re.search(r'10053|10054|10061|WinError|Traceback|Error|Exception|错误|失败|❌', line):
-                        logger.warning(f"[代理] {line.rstrip()}")
-                fh.close()
-
-            reader_thread = threading.Thread(
-                target=pipe_reader,
-                args=(self.proxy_process.stdout, proxy_fh),
-                daemon=True
-            )
-            reader_thread.start()
 
             logger.info(f"   代理进程 PID: {self.proxy_process.pid}")
 
@@ -396,7 +372,6 @@ def main():
     launcher = ClaudeLauncher("config.yaml")
     success = launcher.run()
     sys.exit(0 if success else 1)
-
 
 if __name__ == "__main__":
     main()
