@@ -204,8 +204,7 @@ class ClaudeLauncher:
                 capture_output=True, encoding='utf-8', errors='replace', timeout=10
             )
             if result.returncode == 0:
-                status_line = result.stdout.split('\n')[0] if result.stdout else ''
-                logger.info(f"WSL 状态正常" + (f" ({status_line.strip()})" if status_line else ""))
+                logger.info("WSL 状态正常")
                 return True
         except FileNotFoundError:
             logger.info("未找到 WSL（系统未安装），跳过")
