@@ -63,7 +63,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 logger.info(f"代理日志文件: {_log_file}")
 
-
 def load_config():
     """从 YAML 文件加载配置，并提取 debug_mode"""
     global current_config, DEBUG_MODE
@@ -91,7 +90,6 @@ def load_config():
         logger.error(f"读取配置文件错误: {e}")
         return False
 
-
 class SmartProxy(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass  # 关闭 http.server 自带混乱日志
@@ -113,12 +111,20 @@ class SmartProxy(BaseHTTPRequestHandler):
             data = json.loads(post_data.decode('utf-8'))
             original_model = data.get("model", "")
 
-            # --- 模型映射 ---
-            cleaned = original_model.lower().replace('/', '-').split('-')
-            base_model = cleaned[-1] if cleaned else 'haiku'
+            # --- 模型映射：在名称中查找 tier 关键字 ---
+            model_lower = original_model.lower()
             model_map = current_config.get("model_mapping", {})
-            target_model = model_map.get(base_model, model_map.get('haiku'))
 
+            if 'opus' in model_lower:
+                base_model = 'opus'
+            elif 'sonnet' in model_lower:
+                base_model = 'sonnet'
+            elif 'haiku' in model_lower:
+                base_model = 'haiku'
+            else:
+                base_model = 'haiku'
+
+            target_model = model_map.get(base_model, model_map.get('haiku'))
             if not target_model:
                 raise ValueError(f"未找到型号 '{base_model}' 的映射规则")
 
@@ -166,7 +172,6 @@ class SmartProxy(BaseHTTPRequestHandler):
             except Exception:
                 pass  # 客户端已断开，再次 send 会抛异常
 
-
 def keyboard_listener(server):
     """监听键盘输入，支持热加载配置"""
     while True:
@@ -181,7 +186,6 @@ def keyboard_listener(server):
             logger.info("接收到退出指令，正在关闭服务器...")
             server.shutdown()
             sys.exit(0)
-
 
 if __name__ == '__main__':
     if not load_config():
