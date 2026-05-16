@@ -165,6 +165,7 @@ class ClaudeLauncher:
         self.config_path = config_path
         self.config: Dict[str, Any] = {}
         self.proxy_process: Optional[subprocess.Popen] = None
+        self.wsl_keeper: Optional[subprocess.Popen] = None
         self.extra_exe_manager = ExtraExeManager()
 
     def load_config(self) -> bool:
@@ -193,48 +194,110 @@ class ClaudeLauncher:
             return False
 
     def ensure_wsl_running(self) -> bool:
-        """确保 WSL 已启动（Claude VM 依赖 WSL），仅 Windows 生效"""
+        """确保 WSL2 VM 后台持续运行（Claude VM 沙盒的必要前提），仅 Windows 生效"""
         if os.name != 'nt':
             return True
 
-        logger.info("检查 WSL 状态...")
+        # 0. 检查 wsl.exe 是否可用
         try:
-            result = subprocess.run(
-                ['wsl', '--status'],
+            probe = subprocess.run(
+                ['wsl', '--version'],
                 capture_output=True, encoding='utf-8', errors='replace', timeout=10
             )
-            if result.returncode == 0:
-                logger.info("WSL 状态正常")
-                return True
-        except FileNotFoundError:
-            logger.info("未找到 WSL（系统未安装），跳过")
-            return True
-        except subprocess.TimeoutExpired:
-            logger.info("WSL 状态查询超时，尝试直接启动...")
-        except Exception:
-            pass
-
-        logger.info("启动 WSL（Claude VM 的底层依赖）...")
-        try:
-            result = subprocess.run(
-                ['wsl', '--cd', '~', '-e', 'true'],
-                capture_output=True, encoding='utf-8', errors='replace', timeout=30
-            )
-            if result.returncode == 0:
-                logger.info("WSL 已成功启动")
-                return True
-            else:
-                logger.warning(f"WSL 启动异常 (返回码 {result.returncode})")
+            if probe.returncode != 0:
+                logger.warning("WSL 未安装或不可用，VM 功能将无法启动")
                 return False
         except FileNotFoundError:
-            logger.info("未找到 WSL 可执行文件，跳过")
+            logger.info("未找到 WSL，跳过")
             return True
-        except subprocess.TimeoutExpired:
-            logger.warning("WSL 启动超时 (30s)，继续执行后续流程")
-            return True
+        except Exception:
+            logger.warning("WSL 探测失败，VM 功能将无法启动")
+            return False
+
+        # 1. 确认 WSL2 是默认版本（不是 WSL1）
+        status = subprocess.run(
+            ['wsl', '--status'],
+            capture_output=True, encoding='utf-8', errors='replace', timeout=10
+        )
+        if 'Default Version: 2' not in status.stdout:
+            logger.warning("WSL 默认版本不是 2，VM 需要 WSL2")
+            logger.info("尝试设置为 WSL2...")
+            set_result = subprocess.run(
+                ['wsl', '--set-default-version', '2'],
+                capture_output=True, encoding='utf-8', errors='replace', timeout=30
+            )
+            if set_result.returncode != 0:
+                logger.error("无法设置 WSL2 为默认版本，VM 不可用")
+                return False
+            logger.info("WSL2 已设为默认版本")
+
+        # 2. 检查发行版是否存在
+        distro_result = subprocess.run(
+            ['wsl', '-l', '-v'],
+            capture_output=True, encoding='utf-8', errors='replace', timeout=10
+        )
+        if distro_result.returncode == 0 and len(distro_result.stdout.strip().split('\n')) <= 1:
+            logger.warning("没有安装任何 WSL 发行版，VM 需要至少一个发行版")
+            logger.info("正在安装 Ubuntu...")
+            install_result = subprocess.run(
+                ['wsl', '--install', '-d', 'Ubuntu'],
+                capture_output=False, encoding='utf-8', errors='replace', timeout=300
+            )
+            if install_result.returncode != 0:
+                logger.error("Ubuntu 安装失败，VM 不可用")
+                return False
+            logger.info("Ubuntu 安装完成，请重启电脑后再次运行")
+
+        # 3. 启动后台 keep-alive 进程
+        # WSL2 VM 在有进程运行期间保持存活，全部进程退出后约 15 秒自动关闭
+        # sleep infinity 是系统调用级阻塞（零 CPU），是保持 VM 不关闭的最轻量方式
+        logger.info("保持 WSL VM 后台运行...")
+        try:
+            self.wsl_keeper = subprocess.Popen(
+                ['wsl', '-e', 'sleep', 'infinity'],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            # 等几秒确认 VM 启动
+            time.sleep(3)
+            if self.wsl_keeper.poll() is not None:
+                logger.warning("WSL keep-alive 启动后立即退出，VM 可能不可用")
+                return False
+            logger.info("WSL VM 已在后台持续运行 (PID: {})".format(self.wsl_keeper.pid))
         except Exception as e:
-            logger.warning(f"WSL 启动异常: {e}")
-            return True
+            logger.warning("WSL keep-alive 启动失败: {}".format(e))
+            return False
+
+        # 4. 验证 WSL 确实运行中
+        verify = subprocess.run(
+            ['wsl', '-l', '--running'],
+            capture_output=True, encoding='utf-8', errors='replace', timeout=10
+        )
+        if verify.returncode == 0 and len(verify.stdout.strip()) > 0:
+            logger.info("WSL 运行确认: {}".format(verify.stdout.strip().split('\n')[0]))
+        else:
+            logger.warning("WSL 运行状态验证失败")
+
+        return True
+
+    def stop_wsl_keeper(self):
+        """停止 WSL 后台 keep-alive 进程"""
+        if self.wsl_keeper and self.wsl_keeper.poll() is None:
+            logger.info("停止 WSL keep-alive (PID: {})...".format(self.wsl_keeper.pid))
+            try:
+                # 先优雅关闭所有 WSL 进程
+                subprocess.run(
+                    ['wsl', '--shutdown'],
+                    capture_output=True, timeout=15
+                )
+            except Exception:
+                pass
+            try:
+                self.wsl_keeper.terminate()
+                self.wsl_keeper.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.wsl_keeper.kill()
+            logger.info("WSL keep-alive 已停止")
 
     def start_proxy(self) -> bool:
         try:
@@ -362,6 +425,7 @@ class ClaudeLauncher:
             logger.info("\n收到中断信号...")
         finally:
             self.stop_proxy()
+            self.stop_wsl_keeper()
             self.extra_exe_manager.stop_all()
 
         return True
