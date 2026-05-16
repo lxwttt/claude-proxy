@@ -268,15 +268,15 @@ class ClaudeLauncher:
             logger.warning("WSL keep-alive 启动失败: {}".format(e))
             return False
 
-        # 4. 验证 WSL 确实运行中
+        # 4. 验证 WSL 确实运行中（只读退出码，不解析 stdout——WSL 可能输出终端控制字符）
         verify = subprocess.run(
             ['wsl', '-l', '--running'],
-            capture_output=True, encoding='utf-8', errors='replace', timeout=10
+            capture_output=True, timeout=10
         )
-        if verify.returncode == 0 and len(verify.stdout.strip()) > 0:
-            logger.info("WSL 运行确认: {}".format(verify.stdout.strip().split('\n')[0]))
+        if verify.returncode == 0:
+            logger.info("WSL 2 VM 运行确认成功")
         else:
-            logger.warning("WSL 运行状态验证失败")
+            logger.warning("WSL 运行状态验证异常 (返回码 {})".format(verify.returncode))
 
         return True
 
