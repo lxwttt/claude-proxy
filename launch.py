@@ -72,7 +72,7 @@ class ExtraExeManager:
             if self.is_port_listening(port):
                 logger.info(f"端口 {port} 已启动")
                 return True
-            time.sleep(1)
+            time.sleep(0.5)
             elapsed = int(time.time() - start_time)
             logger.info(f"   等待中... ({elapsed}s/{timeout}s)")
 
@@ -131,7 +131,7 @@ class ExtraExeManager:
                         else:
                             logger.warning(f"{name} 端口 {wait_port} 未启动，但继续执行")
 
-                time.sleep(2)
+                time.sleep(0.5)
 
             except Exception as e:
                 logger.error(f"启动 {name} 失败: {e}")
@@ -165,7 +165,6 @@ class ClaudeLauncher:
         self.config_path = config_path
         self.config: Dict[str, Any] = {}
         self.proxy_process: Optional[subprocess.Popen] = None
-        self.wsl_keeper: Optional[subprocess.Popen] = None
         self.extra_exe_manager = ExtraExeManager()
 
     def load_config(self) -> bool:
@@ -248,22 +247,24 @@ class ClaudeLauncher:
                 return False
             logger.info("Ubuntu 安装完成，请重启电脑后再次运行")
 
-        # 3. 启动后台 keep-alive 进程
-        # WSL2 VM 在有进程运行期间保持存活，全部进程退出后约 15 秒自动关闭
-        # sleep infinity 是系统调用级阻塞（零 CPU），是保持 VM 不关闭的最轻量方式
+        # 3. 用 VBScript 启动 WSL 后台进程（唯一能彻底隐藏控制台窗口的方式）
+        # WSL.exe 是控制台子系统程序，会自建 ConPTY 窗口，Popen 的 creationflags 无法抑制
+        # VBScript Run(..., 0, False) → 隐藏窗口 (0) + 不等待 (False)
         logger.info("保持 WSL VM 后台运行...")
         try:
-            self.wsl_keeper = subprocess.Popen(
-                ['wsl', '-e', 'sleep', 'infinity'],
+            import tempfile
+            vbs_content = 'CreateObject("WScript.Shell").Run "wsl -e sleep infinity", 0, False'
+            vbs_path = os.path.join(tempfile.gettempdir(), '_claude_wsl_keeper.vbs')
+            with open(vbs_path, 'w') as f:
+                f.write(vbs_content)
+            subprocess.run(
+                ['cscript.exe', '//NoLogo', '//B', vbs_path],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                timeout=10,
             )
-            # 等几秒确认 VM 启动
-            time.sleep(3)
-            if self.wsl_keeper.poll() is not None:
-                logger.warning("WSL keep-alive 启动后立即退出，VM 可能不可用")
-                return False
-            logger.info("WSL VM 已在后台持续运行 (PID: {})".format(self.wsl_keeper.pid))
+            logger.info("WSL keep-alive 已通过 VBS 后台启动")
         except Exception as e:
             logger.warning("WSL keep-alive 启动失败: {}".format(e))
             return False
@@ -281,23 +282,16 @@ class ClaudeLauncher:
         return True
 
     def stop_wsl_keeper(self):
-        """停止 WSL 后台 keep-alive 进程"""
-        if self.wsl_keeper and self.wsl_keeper.poll() is None:
-            logger.info("停止 WSL keep-alive (PID: {})...".format(self.wsl_keeper.pid))
-            try:
-                # 先优雅关闭所有 WSL 进程
-                subprocess.run(
-                    ['wsl', '--shutdown'],
-                    capture_output=True, timeout=15
-                )
-            except Exception:
-                pass
-            try:
-                self.wsl_keeper.terminate()
-                self.wsl_keeper.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.wsl_keeper.kill()
-            logger.info("WSL keep-alive 已停止")
+        """停止 WSL 后台 VM（VBS 启动的 sleep infinity 不是 Python 子进程，直接用 shutdown）"""
+        logger.info("停止 WSL VM...")
+        try:
+            subprocess.run(
+                ['wsl', '--shutdown'],
+                capture_output=True, timeout=15
+            )
+            logger.info("WSL VM 已停止")
+        except Exception as e:
+            logger.warning("WSL shutdown 失败: {}".format(e))
 
     def start_proxy(self) -> bool:
         try:
@@ -332,7 +326,7 @@ class ClaudeLauncher:
                 if self.is_port_listening(proxy_port):
                     logger.info(f"代理已在端口 {proxy_port} 启动")
                     return True
-                time.sleep(1)
+                time.sleep(0.5)
                 logger.info(f"   等待中... ({i+1}/30)")
 
             logger.error(f"代理在 30 秒内未能启动")
@@ -420,7 +414,7 @@ class ClaudeLauncher:
 
         try:
             while True:
-                time.sleep(1)
+                time.sleep(0.5)
         except KeyboardInterrupt:
             logger.info("\n收到中断信号...")
         finally:
