@@ -9,6 +9,7 @@ import re
 import requests
 import logging
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import ThreadingMixIn
 from urllib.parse import urljoin
 from threading import Thread
 import sys
@@ -89,6 +90,12 @@ def load_config():
     except Exception as e:
         logger.error(f"读取配置文件错误: {e}")
         return False
+
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    """每请求独立线程，支持多会话并发"""
+    allow_reuse_address = True
+    daemon_threads = True  # 主进程退出时线程自动终止
+
 
 class SmartProxy(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
@@ -193,7 +200,7 @@ if __name__ == '__main__':
         sys.exit(1)
 
     server_address = ('127.0.0.1', 8899)
-    httpd = HTTPServer(server_address, SmartProxy)
+    httpd = ThreadedHTTPServer(server_address, SmartProxy)
 
     listener_thread = Thread(target=keyboard_listener, args=(httpd,), daemon=True)
     listener_thread.start()
