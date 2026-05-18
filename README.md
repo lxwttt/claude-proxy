@@ -4,7 +4,7 @@
 
 ## 功能概览
 
-1. **自动启动代理软件** — 启动额外的 EXE 程序（如 VPN、Clash 等），等待其端口就绪
+1. **自动启动代理软件** — 启动额外的 EXE 程序（如 VPN 等），等待其端口就绪
 2. **挂载系统代理** — 设置 `HTTP_PROXY` / `HTTPS_PROXY` 环境变量，使 Claude 的流量经过代理
 3. **启动 API 转发代理** — 将 Claude 客户端的 API 请求转发到第三方后端（DeepSeek / OpenAI 等），并自动完成模型名称映射
 4. **启动 Claude 桌面版** — 以上所有就绪后自动拉起 Claude 应用
@@ -15,7 +15,7 @@
 ```
 start_claude.cmd
   └─ launch.py  (主启动器)
-        ├─ (1) 启动额外 EXE (WestWorldVPN / Clash 等)
+        ├─ (1) 启动额外 EXE (VPN 等)
         ├─ (2) 设置 HTTP_PROXY / HTTPS_PROXY
         ├─ (3) 启动 local_proxy.py (API 转发代理)
         └─ (4) 启动 Claude 桌面版
@@ -62,14 +62,14 @@ app:
 
 proxy_settings:
   enabled: true
-  http_proxy: "http://127.0.0.1:21882"        # 设置 HTTP_PROXY
-  https_proxy: "http://127.0.0.1:21882"       # 设置 HTTPS_PROXY
+  http_proxy: "http://127.0.0.1:10809"        # 设置 HTTP_PROXY
+  https_proxy: "http://127.0.0.1:10809"       # 设置 HTTPS_PROXY
 
 extra_exes:
-  - name: "WestWorldVPN"
-    path: "C:/path/to/WestWorldVPN.exe"
+  - name: "VPN"
+    path: "C:/path/to/vpn.exe"
     args: ""
-    wait_for_port: 21882                       # 等待此端口就绪
+    wait_for_port: 10809                       # 等待此端口就绪
     description: "代理软件"
     required: true                             # true=启动失败则退出
 ```
@@ -78,7 +78,7 @@ extra_exes:
 
 - `paths.python` — 改为你本机实际的 Python 路径
 - `paths.proxy_script` — 保持指向 `local_proxy.py` 即可
-- `extra_exes` — 填入需要预启动的代理软件（如 Clash、WestWorldVPN、V2Ray 等）。可配置多条；`required: true` 表示该程序必须启动成功，否则退出
+- `extra_exes` — 填入需要预启动的代理软件。可配置多条；`required: true` 表示该程序必须启动成功，否则退出
 - `proxy_settings` — 设置后将注入 `HTTP_PROXY` 和 `HTTPS_PROXY` 环境变量，使 Claude 的请求经过此代理
 - 如果不需要启动额外 EXE，将 `extra_exes` 设为空列表 `[]`
 
@@ -143,11 +143,11 @@ python launch.py
 ==================================================
 启动额外EXE程序
 ==================================================
-启动: WestWorldVPN
+启动: VPN
    路径: ...
-✅ WestWorldVPN 启动成功 (PID: 12345)
-等待端口 21882 启动...
-✅ 端口 21882 已启动
+✅ VPN 启动成功 (PID: 12345)
+等待端口 10809 启动...
+✅ 端口 10809 已启动
 ✅ 所有额外EXE程序启动完成
 启动透明代理...
 ✅ 代理已在端口 8899 启动

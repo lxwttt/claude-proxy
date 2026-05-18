@@ -12,16 +12,13 @@ app:
 
 proxy_settings:
   enabled: true
-  http_proxy: "http://127.0.0.1:21882" # HTTP 代理地址
-  https_proxy: "http://127.0.0.1:21882" # HTTPS 代理地址
-
-debug:
-  enabled: true
+  http_proxy: "http://127.0.0.1:10809" # HTTP 代理地址
+  https_proxy: "http://127.0.0.1:10809" # HTTPS 代理地址
 
 extra_exes:
-  # - name: "MyProxy" # 显示名称
-  #   path: "C:/path/to/proxy.exe" # EXE 路径
+  # - name: "VPN" # 显示名称
+  #   path: "C:/path/to/vpn.exe" # EXE 路径
   #   args: "" # 启动参数
-  #   wait_for_port: 21882 # 等待此端口就绪后继续
+  #   wait_for_port: 10809 # 等待此端口就绪后继续
   #   description: "代理软件" # 描述
   #   required: true # true=启动失败则退出
