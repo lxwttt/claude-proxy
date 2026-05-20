@@ -269,15 +269,25 @@ class ClaudeLauncher:
             logger.warning("WSL keep-alive 启动失败: {}".format(e))
             return False
 
-        # 4. 验证 WSL 确实运行中（只读退出码，不解析 stdout——WSL 可能输出终端控制字符）
-        verify = subprocess.run(
-            ['wsl', '-l', '--running'],
-            capture_output=True, timeout=10
-        )
-        if verify.returncode == 0:
+        # 4. 验证 WSL 确实运行中（VBS 启动后需要等 WSL 初始化完成）
+        for attempt in range(5):
+            verify = subprocess.run(
+                ['wsl', '-l', '--running'],
+                capture_output=True, timeout=10
+            )
+            if verify.returncode == 1:
+                logger.warning("WSL 无运行中的发行版（首次启动初始化中），重试...")
+                time.sleep(0.5)
+                continue
+            elif verify.returncode != 0:
+                logger.warning("WSL 运行状态查询异常 (返回码 {}，尝试 {}/5)".format(
+                    verify.returncode, attempt + 1))
+                time.sleep(0.5)
+                continue
             logger.info("WSL 2 VM 运行确认成功")
+            break
         else:
-            logger.warning("WSL 运行状态验证异常 (返回码 {})".format(verify.returncode))
+            logger.warning("WSL 运行验证超时（5次尝试均失败），但 WSL 可能仍在初始化中")
 
         return True
 
