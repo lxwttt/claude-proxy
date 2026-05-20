@@ -137,13 +137,11 @@ class SmartProxy(BaseHTTPRequestHandler):
 
             data["model"] = target_model
 
-            # --- effort 映射：根据模型 tier 覆盖输出配置 ---
+            # --- effort 映射：仅在原请求已包含 output_config 时覆盖 ---
             effort_map = current_config.get("effort_mapping", {})
-            if base_model in effort_map:
+            if base_model in effort_map and "output_config" in data:
                 target_effort = effort_map[base_model]
                 if target_effort:
-                    if "output_config" not in data:
-                        data["output_config"] = {}
                     old_effort = data["output_config"].get("effort", "未设置")
                     data["output_config"]["effort"] = target_effort
                     if DEBUG_MODE:
