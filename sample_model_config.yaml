@@ -10,8 +10,12 @@ settings:
     api_key: "sk-your-deepseek-api-key-here"        # 替换为实际 API Key
     model_mapping:
       haiku: "deepseek-v4-flash"                    # Claude haiku → DeepSeek 模型
-      sonnet: "deepseek-v4-pro[1m]"                 # Claude sonnet → DeepSeek 模型
-      opus: "deepseek-v4-pro[1m]"                   # Claude opus → DeepSeek 模型
+      sonnet: "deepseek-v4-pro"                     # Claude sonnet → DeepSeek 模型
+      opus: "deepseek-v4-pro"                       # Claude opus → DeepSeek 模型
+    effort_mapping:                                 # 根据模型等级设置 reasoning effort
+      haiku: "high"                                 # 轻量任务
+      sonnet: "xhigh"                               # 中等任务
+      opus: "max"                                   # 复杂任务
 
   # OpenAI:
   #   name: "OpenAI"
@@ -22,3 +26,7 @@ settings:
   #     haiku: "gpt-4o-mini"
   #     sonnet: "gpt-4o"
   #     opus: "gpt-4o"
+  #   effort_mapping:
+  #     haiku: "high"
+  #     sonnet: "xhigh"
+  #     opus: "max"

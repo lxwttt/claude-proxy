@@ -136,6 +136,19 @@ class SmartProxy(BaseHTTPRequestHandler):
                 raise ValueError(f"未找到型号 '{base_model}' 的映射规则")
 
             data["model"] = target_model
+
+            # --- effort 映射：根据模型 tier 覆盖输出配置 ---
+            effort_map = current_config.get("effort_mapping", {})
+            if base_model in effort_map:
+                target_effort = effort_map[base_model]
+                if target_effort:
+                    if "output_config" not in data:
+                        data["output_config"] = {}
+                    old_effort = data["output_config"].get("effort", "未设置")
+                    data["output_config"]["effort"] = target_effort
+                    if DEBUG_MODE:
+                        logger.debug(f"[>>] effort 转换: {old_effort} -> {target_effort}")
+
             new_body = json.dumps(data).encode('utf-8')
 
             # ===== Debug 日志（DEBUG_MODE=true 时才记录到文件） =====
