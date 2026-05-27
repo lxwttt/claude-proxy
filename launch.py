@@ -271,10 +271,15 @@ class ClaudeLauncher:
 
         # 4. 验证 WSL 确实运行中（VBS 启动后需要等 WSL 初始化完成）
         for attempt in range(5):
-            verify = subprocess.run(
-                ['wsl', '-l', '--running'],
-                capture_output=True, timeout=10
-            )
+            try:
+                verify = subprocess.run(
+                    ['wsl', '-l', '--running'],
+                    capture_output=True, timeout=10
+                )
+            except subprocess.TimeoutExpired:
+                logger.warning("WSL 运行状态查询超时（尝试 {}/5）".format(attempt + 1))
+                time.sleep(0.5)
+                continue
             if verify.returncode == 1:
                 logger.warning("WSL 无运行中的发行版（首次启动初始化中），重试...")
                 time.sleep(0.5)
