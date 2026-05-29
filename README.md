@@ -1,38 +1,45 @@
-# Claude Auto-Launcher
+# Claude Proxy
 
-一键启动 Claude 桌面版，并自动挂载 HTTP/HTTPS 代理和 API 转发代理。适用于需要代理访问 Claude 服务或通过第三方 API（如 DeepSeek、OpenAI）桥接 Claude 客户端的场景。
+一键启动 Claude 桌面版，自动挂载 HTTP/HTTPS 代理并启动 API 转发代理。核心场景：**让 Claude Desktop 客户端使用第三方 API 后端**（DeepSeek、OpenAI 等），无需修改 Claude 自身代码。
 
 ## 功能概览
 
-1. **自动启动代理软件** — 启动额外的 EXE 程序（如 VPN 等），等待其端口就绪
-2. **挂载系统代理** — 设置 `HTTP_PROXY` / `HTTPS_PROXY` 环境变量，使 Claude 的流量经过代理
-3. **启动 API 转发代理** — 将 Claude 客户端的 API 请求转发到第三方后端（DeepSeek / OpenAI 等），并自动完成模型名称映射
-4. **启动 Claude 桌面版** — 以上所有就绪后自动拉起 Claude 应用
-5. **退出** — Ctrl+C 后按逆序停止所有进程
+1. **WSL2 VM 保活** — 自动检测并保持 WSL2 运行（Claude 沙盒 VM 的前提）
+2. **自动启动代理软件** — 启动额外 EXE（VPN 等），等待端口就绪
+3. **挂载系统代理** — 设置 `HTTP_PROXY` / `HTTPS_PROXY` 环境变量
+4. **API 转发代理** — 本地 HTTP 服务器拦截 Claude 的 API 请求，完成模型名映射 + effort 映射后转发到第三方后端
+5. **启动 Claude 桌面版** — 所有组件就绪后自动拉起 Claude
+6. **优雅退出** — Ctrl+C 后逆序停止所有进程（含 WSL VM）
 
 ## 架构
 
 ```
-start_claude.cmd
+start_claude.cmd (Windows 入口)
   └─ launch.py  (主启动器)
-        ├─ (1) 启动额外 EXE (VPN 等)
-        ├─ (2) 设置 HTTP_PROXY / HTTPS_PROXY
-        ├─ (3) 启动 local_proxy.py (API 转发代理)
+        ├─ (0) 确保 WSL2 VM 后台运行 (Claude 沙盒需要)
+        ├─ (1) 启动额外 EXE (VPN 等)，等待端口就绪
+        ├─ (2) 设置 HTTP_PROXY / HTTPS_PROXY 环境变量
+        ├─ (3) 启动 local_proxy.py (API 转发代理，:8899)
         └─ (4) 启动 Claude 桌面版
 
 local_proxy.py  (运行在 127.0.0.1:8899)
   ├─ 接收 Claude 的 API 请求
-  ├─ 模型名称映射 (haiku→deepseek-v4-flash 等)
-  └─ 转发到目标 API (DeepSeek / OpenAI)
+  ├─ 模型名称映射 (haiku/sonnet/opus → 目标模型)
+  ├─ effort 映射 (按模型等级覆写 reasoning effort)
+  └─ 转发到目标 API (DeepSeek Anthropic 兼容端点 / OpenAI)
 ```
 
 ## 文件结构
 
-- `launch.py` — 主启动器，负责启动 EXE、挂代理、启动转发代理、启动 Claude
-- `local_proxy.py` — API 转发代理，接收 Claude 请求并转发到第三方 API
-- `config.yaml` — 启动器配置，Python 路径、代理端口、额外 EXE 等
-- `model_config.yaml` — 模型映射配置，选择后端 API 和模型映射规则
-- `start_claude.cmd` — Windows 入口批处理文件
+| 文件 | 用途 |
+|---|---|
+| `launch.py` | 主启动器 — 编排 WSL、VPN、代理、Claude 的启动顺序 |
+| `local_proxy.py` | API 转发代理 — HTTP 服务器，模型名映射 + effort 映射 + 请求转发 |
+| `config.yaml` | 启动器配置 — Python 路径、端口、额外 EXE（从 `sample_config.yaml` 复制） |
+| `model_config.yaml` | API 转发配置 — 后端选择、API Key、模型映射、effort 映射（从 `sample_model_config.yaml` 复制） |
+| `start_claude.cmd` | Windows 批处理入口 — 校验环境后启动 `launch.py` |
+| `sample_config.yaml` | 启动器配置模板 |
+| `sample_model_config.yaml` | 模型配置模板 |
 
 ## 前置条件
 
@@ -111,7 +118,20 @@ settings:
 
 **模型映射说明：**
 
-Claude 客户端请求时携带的模型名（如 `claude-sonnet-4-20250514`）会被 `local_proxy.py` 提取最后的单词 `sonnet`，然后根据 `model_mapping` 映射为目标 API 的模型名。你可以在 `model_mapping` 中添加任意映射规则。
+Claude 客户端请求时携带的模型名（如 `claude-sonnet-4-20250514`）会被 `local_proxy.py` 提取 tier 关键字（`opus`/`sonnet`/`haiku`），然后根据 `model_mapping` 映射为目标 API 的模型名。
+
+**effort 映射：**
+
+当原请求包含 `output_config` 字段时，代理会根据模型等级自动覆写 `reasoning.effort` 值。这对于 DeepSeek 等支持 reasoning effort 的后端特别有用 —— 可以根据任务复杂度分配合适的推理深度：
+
+```yaml
+effort_mapping:
+  haiku: "high"     # 轻量任务用 high
+  sonnet: "xhigh"   # 中等任务用 xhigh
+  opus: "max"       # 复杂任务用 max
+```
+
+如果原请求没有 `output_config`，则跳过 effort 映射，不做任何修改。
 
 **热切换：**
 
@@ -168,21 +188,35 @@ python launch.py
 
 `ClaudeLauncher` 类按序执行以下步骤：
 
-1. **加载配置** — 读取 `config.yaml`
-2. **设置代理环境变量** — 将 `HTTP_PROXY` / `HTTPS_PROXY` 注入当前进程环境
-3. **启动额外 EXE** — `ExtraExeManager` 逐一启动 EXE，等待端口就绪
-4. **启动转发代理** — 以子进程运行 `local_proxy.py`，等待端口 8899 就绪
-5. **启动 Claude** — 通过 App User Model ID 或 EXE 路径启动 Claude
-6. **保持运行** — 等待 Ctrl+C，然后逆序清理所有子进程
+1. **确保 WSL2 运行** — 检测 WSL 可用性，设置 WSL2 为默认版本，必要时安装 Ubuntu 发行版，通过 VBScript 后台保活 WSL VM（Claude 沙盒功能依赖此 VM）
+2. **加载配置** — 读取 `config.yaml`
+3. **设置代理环境变量** — 将 `HTTP_PROXY` / `HTTPS_PROXY` 注入当前进程环境
+4. **启动额外 EXE** — `ExtraExeManager` 逐一启动 EXE，等待端口就绪
+5. **启动转发代理** — 以子进程运行 `local_proxy.py`，等待端口 8899 就绪
+6. **启动 Claude** — 通过 App User Model ID 或 EXE 路径启动 Claude
+7. **保持运行** — 等待 Ctrl+C，逆序清理：Claude 进程 → 停止转发代理 → 停止额外 EXE → 关闭 WSL VM
 
 ### local_proxy.py — API 转发代理
 
-一个轻量级 HTTP 服务器（基于 `http.server`），运行在 `127.0.0.1:8899`：
+一个轻量级多线程 HTTP 服务器（基于 `http.server` + `ThreadingMixIn`），运行在 `127.0.0.1:8899`：
 
 - **GET /** — 健康检查，返回 `{"status": "ok"}`
-- **POST /*** — 接收 Claude 发送的 API 请求，按 `model_mapping` 替换模型名，转发到 `api_base_url`
-- 支持调试模式（输出请求/响应详情到终端）
-- 运行时按 `r` 热加载配置，按 `q` 退出
+- **POST /*** — 接收 Claude 的 API 请求，按 `model_mapping` 替换模型名，按 `effort_mapping` 覆写 reasoning effort，转发到 `api_base_url`
+- Debug 模式（`debug_mode: true`）将完整请求/响应写入日志文件 `logs/proxy_YYYYMMDD.log`
+- 运行时按 `r` 热加载 `model_config.yaml`，按 `q` 退出
+
+### 日志
+
+两个程序均输出日志到 `logs/` 目录，按日轮转：
+
+- `logs/launcher_YYYYMMDD.log` — launch.py 的完整日志
+- `logs/proxy_YYYYMMDD.log` — local_proxy.py 的完整日志
+
+文件日志自动去除 ANSI 颜色码和 emoji；控制台输出保留。`debug_mode: true` 时，API 请求/响应的完整内容会写入代理日志。
+
+### WSL2 VM 保活机制
+
+`launch.py` 需要 WSL2 保持后台运行（Claude 沙盒 VM 的前提）。`wsl -e sleep infinity` 可以维持 VM 存活，但 `wsl.exe` 是控制台子系统程序，即使使用 `CREATE_NO_WINDOW` 也无法隐藏其窗口。解决方案：通过 VBScript 的 `WScript.Shell.Run(hidden)` 启动 WSL，再调用 `cscript.exe` 执行该 VBS。
 
 ### 指定 Claude 启动方式
 

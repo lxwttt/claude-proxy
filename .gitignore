@@ -4,3 +4,7 @@ model_config.yaml
 
 *.log
 __pycache__/
+
+.codegraph/
+
+CLAUDE.MD
