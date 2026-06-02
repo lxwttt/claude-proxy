@@ -5,7 +5,7 @@
 """
 import json
 import yaml
-import re
+import threading
 import requests
 import logging
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -15,54 +15,31 @@ from threading import Thread
 import sys
 import traceback
 import os
-import time
-from pathlib import Path
 
-# ========== 修复 stdout 编码 ==========
-if hasattr(sys.stdout, 'reconfigure'):
-    sys.stdout.reconfigure(encoding='utf-8')
-if hasattr(sys.stderr, 'reconfigure'):
-    sys.stderr.reconfigure(encoding='utf-8')
+from common import (
+    setup_logging,
+    TIERS,
+    DEFAULT_TIER,
+    MAX_REQUEST_BODY_BYTES,
+    validate_config_schema,
+)
 
 # ========== 全局变量 ==========
 current_config = {}
 script_dir = os.path.dirname(os.path.abspath(__file__))
 config_file_path = os.path.join(script_dir, "model_config.yaml")
 DEBUG_MODE = False
+_config_lock = threading.Lock()
 
 # ========== 日志系统（文件 + 控制台） ==========
-_log_dir = Path(script_dir) / "logs"
-_log_dir.mkdir(exist_ok=True)
-_log_file = _log_dir / f"proxy_{time.strftime('%Y%m%d')}.log"
-
-_ansi_re = re.compile(r'\033\[[0-9;]*m')
-
-class _FileFormatter(logging.Formatter):
-    """文件日志用 —— 自动去除 ANSI 颜色码和 emoji"""
-    def format(self, record):
-        msg = super().format(record)
-        msg = _ansi_re.sub('', msg)
-        msg = re.sub(r'[\U00010000-\U0010FFFF\U0000FE00-\U0000FE0F]', '', msg)
-        return msg
-
-# 控制台 handler（WARNING+，保留特殊字符）
-_console_fmt = logging.Formatter('%(asctime)s - %(levelname)s - [Proxy] %(message)s')
-_console_handler = logging.StreamHandler(sys.stderr)
-_console_handler.setFormatter(_console_fmt)
-_console_handler.setLevel(logging.WARNING)
-
-# 文件 handler（DEBUG+，每日追加，字符净化）
-_file_fmt = _FileFormatter('%(asctime)s - %(levelname)s - %(message)s')
-_file_handler = logging.FileHandler(_log_file, encoding='utf-8')
-_file_handler.setFormatter(_file_fmt)
-_file_handler.setLevel(logging.DEBUG)
-
-logging.basicConfig(
-    level=logging.DEBUG,
-    handlers=[_console_handler, _file_handler],
+logger = setup_logging(
+    __name__,
+    log_prefix='proxy',
+    console_level=logging.WARNING,
+    file_level=logging.DEBUG,
+    console_fmt='%(asctime)s - %(levelname)s - [Proxy] %(message)s',
 )
-logger = logging.getLogger(__name__)
-logger.info(f"代理日志文件: {_log_file}")
+
 
 def load_config():
     """从 YAML 文件加载配置，并提取 debug_mode"""
@@ -78,11 +55,19 @@ def load_config():
             logger.error(f"未找到名为 '{current_env_name}' 的环境设置")
             return False
 
-        current_config = env_config
-        base_url = current_config.get('api_base_url', '').rstrip('/')
-        current_config['api_base_url'] = base_url
+        # 配置模式验证
+        if not validate_config_schema(
+            env_config,
+            ('api_base_url', 'api_key', 'model_mapping'),
+            context=f'env:{current_env_name}',
+        ):
+            logger.error(f"配置 '{current_env_name}' 缺少必要字段，加载失败")
+            return False
 
-        DEBUG_MODE = current_config.get("debug_mode", False)
+        with _config_lock:
+            current_config = env_config
+            DEBUG_MODE = current_config.get("debug_mode", False)
+            base_url = current_config.get('api_base_url', '')
 
         logger.info(f"配置 '{current_env_name}' 加载成功 (BaseURL: {base_url})")
         logger.info(f"Debug模式: {'ON' if DEBUG_MODE else 'OFF'}")
@@ -90,6 +75,7 @@ def load_config():
     except Exception as e:
         logger.error(f"读取配置文件错误: {e}")
         return False
+
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     """每请求独立线程，支持多会话并发"""
@@ -108,66 +94,89 @@ class SmartProxy(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps({"status": "ok"}).encode())
 
+    def _resolve_model(self, model_name, config):
+        """从模型名提取 tier 关键字，返回 (tier, target_model)"""
+        model_lower = model_name.lower()
+        model_map = config.get("model_mapping", {})
+
+        matched_tier = DEFAULT_TIER
+        for tier in TIERS:
+            if tier in model_lower:
+                matched_tier = tier
+                break
+
+        target_model = model_map.get(matched_tier, model_map.get(DEFAULT_TIER))
+        if not target_model:
+            raise ValueError(f"未找到型号 '{matched_tier}' 的映射规则")
+        return matched_tier, target_model
+
+    def _apply_effort_mapping(self, data, tier, config, debug):
+        """effort 映射：仅在原请求已包含 output_config 时覆盖"""
+        effort_map = config.get("effort_mapping", {})
+        if tier in effort_map and "output_config" in data:
+            target_effort = effort_map[tier]
+            if target_effort:
+                old_effort = data["output_config"].get("effort", "未设置")
+                data["output_config"]["effort"] = target_effort
+                if debug:
+                    logger.debug(f"[>>] effort 转换: {old_effort} -> {target_effort}")
+
+    def _forward_request(self, data, target_url, headers):
+        """转发请求到上游 API"""
+        new_body = json.dumps(data).encode('utf-8')
+        return requests.post(target_url, data=new_body, headers=headers, timeout=120)
+
     def do_POST(self):
         """核心转发逻辑"""
-        global DEBUG_MODE
+        # 线程安全读取配置
+        with _config_lock:
+            _debug = DEBUG_MODE
+            _config = dict(current_config)  # shallow copy for this request
+
+        # 请求体大小限制
         content_length = int(self.headers.get('Content-Length', 0))
+        if content_length > MAX_REQUEST_BODY_BYTES:
+            self.send_response(413)  # Payload Too Large
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": "Request body too large"}).encode())
+            return
+
         post_data = self.rfile.read(content_length) if content_length > 0 else b'{}'
 
         try:
             data = json.loads(post_data.decode('utf-8'))
             original_model = data.get("model", "")
 
-            # --- 模型映射：在名称中查找 tier 关键字 ---
-            model_lower = original_model.lower()
-            model_map = current_config.get("model_mapping", {})
-
-            if 'opus' in model_lower:
-                base_model = 'opus'
-            elif 'sonnet' in model_lower:
-                base_model = 'sonnet'
-            elif 'haiku' in model_lower:
-                base_model = 'haiku'
-            else:
-                base_model = 'haiku'
-
-            target_model = model_map.get(base_model, model_map.get('haiku'))
-            if not target_model:
-                raise ValueError(f"未找到型号 '{base_model}' 的映射规则")
-
+            # --- 模型映射 ---
+            matched_tier, target_model = self._resolve_model(original_model, _config)
             data["model"] = target_model
 
-            # --- effort 映射：仅在原请求已包含 output_config 时覆盖 ---
-            effort_map = current_config.get("effort_mapping", {})
-            if base_model in effort_map and "output_config" in data:
-                target_effort = effort_map[base_model]
-                if target_effort:
-                    old_effort = data["output_config"].get("effort", "未设置")
-                    data["output_config"]["effort"] = target_effort
-                    if DEBUG_MODE:
-                        logger.debug(f"[>>] effort 转换: {old_effort} -> {target_effort}")
+            # --- effort 映射 ---
+            self._apply_effort_mapping(data, matched_tier, _config, _debug)
 
-            new_body = json.dumps(data).encode('utf-8')
+            # 构建目标 URL（确保 base_url 以 '/' 结尾，避免 urljoin 截断）
+            base_url = _config.get("api_base_url", "")
+            if not base_url.endswith('/'):
+                base_url += '/'
+            target_url = urljoin(base_url, self.path.lstrip('/'))
 
             # ===== Debug 日志（DEBUG_MODE=true 时才记录到文件） =====
-            if DEBUG_MODE:
+            if _debug:
                 logger.debug(f"[>>] 收到请求: {self.path}")
                 logger.debug(f"[>>] 模型转换: {original_model} -> {target_model}")
-                logger.debug(f"[>>] 请求体:\n{json.dumps(json.loads(post_data.decode('utf-8')), indent=2, ensure_ascii=False)}")
+                logger.debug(f"[>>] 请求体:\n{json.dumps(data, indent=2, ensure_ascii=False)}")
 
             headers = {
                 'Content-Type': 'application/json',
-                'Authorization': f'Bearer {current_config.get("api_key")}'
+                'Authorization': f'Bearer {_config.get("api_key")}'
             }
 
-            base_url = current_config.get("api_base_url", "")
-            target_url = urljoin(base_url + '/', self.path.lstrip('/'))
-
             # 转发请求
-            response = requests.post(target_url, data=new_body, headers=headers, timeout=120)
+            response = self._forward_request(data, target_url, headers)
 
             # ===== Debug 日志 =====
-            if DEBUG_MODE:
+            if _debug:
                 logger.debug(f"[<<] 上游响应 ({response.status_code})")
                 logger.debug(f"[<<] 转发至: {target_url}")
                 logger.debug(f"[<<] 响应体:\n{response.text}")
@@ -187,13 +196,20 @@ class SmartProxy(BaseHTTPRequestHandler):
                 self.send_header('Content-Type', 'application/json')
                 self.end_headers()
                 self.wfile.write(json.dumps({"error": str(e)}).encode())
-            except Exception:
-                pass  # 客户端已断开，再次 send 会抛异常
+            except Exception as send_err:
+                logger.debug(f"发送错误响应失败（客户端可能已断开）: {send_err}")
+
 
 def keyboard_listener(server):
     """监听键盘输入，支持热加载配置"""
     while True:
-        cmd = input().strip().lower()
+        try:
+            cmd = input().strip().lower()
+        except EOFError:
+            logger.info("stdin 已关闭，键盘监听退出")
+            break
+        except Exception:
+            break
         if cmd == 'r':
             logger.info("正在重新加载配置...")
             if load_config():
@@ -204,6 +220,7 @@ def keyboard_listener(server):
             logger.info("接收到退出指令，正在关闭服务器...")
             server.shutdown()
             sys.exit(0)
+
 
 if __name__ == '__main__':
     if not load_config():

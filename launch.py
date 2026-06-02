@@ -9,39 +9,29 @@ import sys
 import time
 import yaml
 import subprocess
-import socket
 import logging
 import threading
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
-# ========== 修复 stdout/stderr 编码，避免重定向到文件时中文乱码 ==========
-if hasattr(sys.stdout, 'reconfigure'):
-    sys.stdout.reconfigure(encoding='utf-8')
-if hasattr(sys.stderr, 'reconfigure'):
-    sys.stderr.reconfigure(encoding='utf-8')
-
-# ========== 自动文件日志 + 控制台输出 ==========
-_log_dir = Path(__file__).parent / "logs"
-_log_dir.mkdir(exist_ok=True)
-_log_file = _log_dir / f"launcher_{time.strftime('%Y%m%d')}.log"
-
-_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-
-# 控制台 handler（stderr）
-_console_handler = logging.StreamHandler(sys.stderr)
-_console_handler.setFormatter(_formatter)
-
-# 文件 handler（UTF-8，每日追加）
-_file_handler = logging.FileHandler(_log_file, encoding='utf-8')
-_file_handler.setFormatter(_formatter)
-
-logging.basicConfig(
-    level=logging.INFO,
-    handlers=[_console_handler, _file_handler],
+from common import (
+    is_port_listening,
+    wait_for_port,
+    terminate_process,
+    start_process,
+    setup_logging,
+    validate_config_schema,
+    TIERS,
+    DEFAULT_TIER,
+    WSL_VERIFY_ATTEMPTS,
+    WSL_VERIFY_INTERVAL,
 )
-logger = logging.getLogger(__name__)
-logger.info(f"日志文件: {_log_file}")
+
+# ========== 常量 ==========
+PROXY_START_TIMEOUT = 30
+
+# ========== 日志 ==========
+logger = setup_logging(__name__, log_prefix='launcher', console_level=logging.INFO)
 
 
 class ExtraExeManager:
@@ -49,35 +39,6 @@ class ExtraExeManager:
 
     def __init__(self):
         self.processes: List[subprocess.Popen] = []
-
-    def is_port_listening(self, port: int, host: str = '127.0.0.1') -> bool:
-        """检查端口是否在监听"""
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(1)
-                result = s.connect_ex((host, port))
-                return result == 0
-        except:
-            return False
-
-    def wait_for_port(self, port: int, timeout: int = 30) -> bool:
-        """等待端口启动"""
-        if port <= 0:
-            return True
-
-        logger.info(f"等待端口 {port} 启动...")
-        start_time = time.time()
-
-        while time.time() - start_time < timeout:
-            if self.is_port_listening(port):
-                logger.info(f"端口 {port} 已启动")
-                return True
-            time.sleep(0.5)
-            elapsed = int(time.time() - start_time)
-            logger.info(f"   等待中... ({elapsed}s/{timeout}s)")
-
-        logger.error(f"端口 {port} 在 {timeout} 秒内未能启动")
-        return False
 
     def start_extra_exes(self, extra_exes: List[Dict]) -> bool:
         """启动所有额外的EXE程序"""
@@ -108,35 +69,29 @@ class ExtraExeManager:
                     return False
                 continue
 
-            try:
-                cmd = [path]
-                if args:
-                    cmd.extend(args.split())
+            cmd = [path]
+            if args:
+                cmd.extend(args.split())
 
-                process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
-                )
-
-                self.processes.append(process)
-                logger.info(f"{name} 启动成功 (PID: {process.pid})")
-
-                if wait_port > 0:
-                    if not self.wait_for_port(wait_port):
-                        if required:
-                            logger.error(f"{name} 端口 {wait_port} 启动失败")
-                            return False
-                        else:
-                            logger.warning(f"{name} 端口 {wait_port} 未启动，但继续执行")
-
-                time.sleep(0.5)
-
-            except Exception as e:
-                logger.error(f"启动 {name} 失败: {e}")
+            process = start_process(cmd)
+            if process is None:
+                logger.error(f"启动 {name} 失败")
                 if required:
                     return False
+                continue
+
+            self.processes.append(process)
+            logger.info(f"{name} 启动成功 (PID: {process.pid})")
+
+            if wait_port > 0:
+                if not wait_for_port(wait_port, timeout=PROXY_START_TIMEOUT):
+                    if required:
+                        logger.error(f"{name} 端口 {wait_port} 启动失败")
+                        return False
+                    else:
+                        logger.warning(f"{name} 端口 {wait_port} 未启动，但继续执行")
+
+            time.sleep(0.5)
 
         logger.info("所有额外EXE程序启动完成")
         return True
@@ -145,17 +100,9 @@ class ExtraExeManager:
         """停止所有启动的EXE程序"""
         logger.info("停止所有额外EXE程序...")
         for process in self.processes:
-            try:
-                if process.poll() is None:
-                    logger.info(f"   停止 PID: {process.pid}")
-                    process.terminate()
-                    try:
-                        process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-            except Exception as e:
-                logger.error(f"停止进程失败: {e}")
-
+            if process and process.poll() is None:
+                logger.info(f"   停止 PID: {process.pid}")
+            terminate_process(process)
         self.processes.clear()
         logger.info("所有额外EXE程序已停止")
 
@@ -166,6 +113,7 @@ class ClaudeLauncher:
         self.config: Dict[str, Any] = {}
         self.proxy_process: Optional[subprocess.Popen] = None
         self.extra_exe_manager = ExtraExeManager()
+        self._stop_event = threading.Event()
 
     def load_config(self) -> bool:
         try:
@@ -183,21 +131,12 @@ class ClaudeLauncher:
             logger.error(f"加载配置文件失败: {e}")
             return False
 
-    def is_port_listening(self, port: int, host: str = '127.0.0.1') -> bool:
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(1)
-                result = s.connect_ex((host, port))
-                return result == 0
-        except:
-            return False
+    # ------------------------------------------------------------------
+    # WSL 管理 - 子方法
+    # ------------------------------------------------------------------
 
-    def ensure_wsl_running(self) -> bool:
-        """确保 WSL2 VM 后台持续运行（Claude VM 沙盒的必要前提），仅 Windows 生效"""
-        if os.name != 'nt':
-            return True
-
-        # 0. 检查 wsl.exe 是否可用
+    def _check_wsl_available(self) -> bool:
+        """检查 wsl.exe 是否存在且可用。"""
         try:
             probe = subprocess.run(
                 ['wsl', '--version'],
@@ -208,12 +147,15 @@ class ClaudeLauncher:
                 return False
         except FileNotFoundError:
             logger.info("未找到 WSL，跳过")
-            return True
+            return False
         except Exception:
             logger.warning("WSL 探测失败，VM 功能将无法启动")
             return False
+        return True
 
-        # 1. 确认 WSL2 是默认版本（不是 WSL1）
+    def _ensure_wsl2_default(self) -> bool:
+        """确认 WSL2 是默认版本（不是 WSL1）。"""
+        # 1. 确认 WSL2 是默认版本
         status = subprocess.run(
             ['wsl', '--status'],
             capture_output=True, encoding='utf-8', errors='replace', timeout=10
@@ -229,25 +171,22 @@ class ClaudeLauncher:
                 logger.error("无法设置 WSL2 为默认版本，VM 不可用")
                 return False
             logger.info("WSL2 已设为默认版本")
+        return True
 
-        # 2. 检查发行版是否存在
+    def _ensure_wsl_distro_exists(self) -> bool:
+        """检查 WSL 发行版是否已安装。"""
         distro_result = subprocess.run(
             ['wsl', '-l', '-v'],
             capture_output=True, encoding='utf-8', errors='replace', timeout=10
         )
         if distro_result.returncode == 0 and len(distro_result.stdout.strip().split('\n')) <= 1:
             logger.warning("没有安装任何 WSL 发行版，VM 需要至少一个发行版")
-            logger.info("正在安装 Ubuntu...")
-            install_result = subprocess.run(
-                ['wsl', '--install', '-d', 'Ubuntu'],
-                capture_output=False, encoding='utf-8', errors='replace', timeout=300
-            )
-            if install_result.returncode != 0:
-                logger.error("Ubuntu 安装失败，VM 不可用")
-                return False
-            logger.info("Ubuntu 安装完成，请重启电脑后再次运行")
+            logger.error("未安装 WSL 发行版，VM 功能不可用。请手动运行: wsl --install -d Ubuntu")
+            return False
+        return True
 
-        # 3. 用 VBScript 启动 WSL 后台进程（唯一能彻底隐藏控制台窗口的方式）
+    def _start_wsl_keeper(self) -> bool:
+        """用 VBScript 启动 WSL 后台进程（唯一能彻底隐藏控制台窗口的方式）。"""
         # WSL.exe 是控制台子系统程序，会自建 ConPTY 窗口，Popen 的 creationflags 无法抑制
         # VBScript Run(..., 0, False) → 隐藏窗口 (0) + 不等待 (False)
         logger.info("保持 WSL VM 后台运行...")
@@ -265,35 +204,60 @@ class ClaudeLauncher:
                 timeout=10,
             )
             logger.info("WSL keep-alive 已通过 VBS 后台启动")
+            return True
         except Exception as e:
             logger.warning("WSL keep-alive 启动失败: {}".format(e))
             return False
 
-        # 4. 验证 WSL 确实运行中（VBS 启动后需要等 WSL 初始化完成）
-        for attempt in range(5):
+    def _verify_wsl_running(self) -> bool:
+        """验证 WSL 确实运行中（VBS 启动后需要等 WSL 初始化完成）。"""
+        for attempt in range(WSL_VERIFY_ATTEMPTS):
             try:
                 verify = subprocess.run(
                     ['wsl', '-l', '--running'],
                     capture_output=True, timeout=10
                 )
             except subprocess.TimeoutExpired:
-                logger.warning("WSL 运行状态查询超时（尝试 {}/5）".format(attempt + 1))
-                time.sleep(0.5)
+                logger.warning("WSL 运行状态查询超时（尝试 {}/{}）".format(attempt + 1, WSL_VERIFY_ATTEMPTS))
+                time.sleep(WSL_VERIFY_INTERVAL)
                 continue
             if verify.returncode == 1:
                 logger.warning("WSL 无运行中的发行版（首次启动初始化中），重试...")
-                time.sleep(0.5)
+                time.sleep(WSL_VERIFY_INTERVAL)
                 continue
             elif verify.returncode != 0:
-                logger.warning("WSL 运行状态查询异常 (返回码 {}，尝试 {}/5)".format(
-                    verify.returncode, attempt + 1))
-                time.sleep(0.5)
+                logger.warning("WSL 运行状态查询异常 (返回码 {}，尝试 {}/{})".format(
+                    verify.returncode, attempt + 1, WSL_VERIFY_ATTEMPTS))
+                time.sleep(WSL_VERIFY_INTERVAL)
                 continue
             logger.info("WSL 2 VM 运行确认成功")
-            break
-        else:
-            logger.warning("WSL 运行验证超时（5次尝试均失败），但 WSL 可能仍在初始化中")
+            return True
 
+        logger.warning("WSL 运行验证超时（{}次尝试均失败），但 WSL 可能仍在初始化中".format(WSL_VERIFY_ATTEMPTS))
+        return False
+
+    # ------------------------------------------------------------------
+    # WSL 管理 - 编排
+    # ------------------------------------------------------------------
+
+    def ensure_wsl_running(self) -> bool:
+        """确保 WSL2 VM 后台持续运行（Claude VM 沙盒的必要前提），仅 Windows 生效"""
+        if os.name != 'nt':
+            return True
+
+        if not self._check_wsl_available():
+            return False
+
+        if not self._ensure_wsl2_default():
+            return False
+
+        if not self._ensure_wsl_distro_exists():
+            return False
+
+        if not self._start_wsl_keeper():
+            return False
+
+        self._verify_wsl_running()  # 验证失败不阻止继续
         return True
 
     def stop_wsl_keeper(self):
@@ -307,6 +271,10 @@ class ClaudeLauncher:
             logger.info("WSL VM 已停止")
         except Exception as e:
             logger.warning("WSL shutdown 失败: {}".format(e))
+
+    # ------------------------------------------------------------------
+    # 代理管理
+    # ------------------------------------------------------------------
 
     def start_proxy(self) -> bool:
         try:
@@ -325,28 +293,23 @@ class ClaudeLauncher:
             logger.info(f"   Python: {python_path}")
             logger.info(f"   脚本: {proxy_script}")
 
-            self.proxy_process = subprocess.Popen(
+            self.proxy_process = start_process(
                 [python_path, proxy_script],
                 cwd=str(Path(proxy_script).parent),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
             )
+            if self.proxy_process is None:
+                logger.error("代理进程启动失败")
+                return False
 
             logger.info(f"   代理进程 PID: {self.proxy_process.pid}")
 
             proxy_port = self.config['ports']['proxy_port']
-            logger.info(f"   等待代理在端口 {proxy_port} 启动...")
+            if not wait_for_port(proxy_port, label='proxy'):
+                logger.error(f"代理在 {PROXY_START_TIMEOUT} 秒内未能启动")
+                self.stop_proxy()
+                return False
 
-            for i in range(30):
-                if self.is_port_listening(proxy_port):
-                    logger.info(f"代理已在端口 {proxy_port} 启动")
-                    return True
-                time.sleep(0.5)
-                logger.info(f"   等待中... ({i+1}/30)")
-
-            logger.error(f"代理在 30 秒内未能启动")
-            self.stop_proxy()
-            return False
+            return True
 
         except Exception as e:
             logger.error(f"启动代理失败: {e}")
@@ -357,26 +320,29 @@ class ClaudeLauncher:
     def stop_proxy(self):
         if self.proxy_process and self.proxy_process.poll() is None:
             logger.info(f"停止代理进程 (PID: {self.proxy_process.pid})...")
-            self.proxy_process.terminate()
-            try:
-                self.proxy_process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.proxy_process.kill()
+            terminate_process(self.proxy_process, label='proxy')
             logger.info("代理已停止")
+            self.proxy_process = None
 
     def launch_claude(self) -> bool:
         try:
-            app_id = self.config['app'].get('app_id')
-            claude_exe = self.config['paths'].get('claude_exe')
+            app_id = self.config.get('app', {}).get('app_id')
+            claude_exe = self.config.get('paths', {}).get('claude_exe')
 
             if app_id:
                 logger.info(f"通过 AppID 启动 Claude: {app_id}")
-                subprocess.Popen(['explorer.exe', f'shell:AppsFolder\\{app_id}'])
+                proc = start_process(['explorer.exe', f'shell:AppsFolder\\{app_id}'], hide_window=True)
+                if proc is None:
+                    logger.error("Claude AppID 启动失败")
+                    return False
                 logger.info("Claude 已通过 AppID 启动")
                 return True
             elif claude_exe and Path(claude_exe).exists():
                 logger.info(f"通过 EXE 启动 Claude: {claude_exe}")
-                subprocess.Popen([claude_exe])
+                proc = start_process([claude_exe], hide_window=True)
+                if proc is None:
+                    logger.error("Claude EXE 启动失败")
+                    return False
                 logger.info("Claude 已通过 EXE 启动")
                 return True
             else:
@@ -386,40 +352,55 @@ class ClaudeLauncher:
             logger.error(f"启动 Claude 失败: {e}")
             return False
 
+    # ------------------------------------------------------------------
+    # 清理与运行
+    # ------------------------------------------------------------------
+
+    def _cleanup(self):
+        """清理所有资源：停止代理、WSL、额外EXE"""
+        self.stop_proxy()
+        self.stop_wsl_keeper()
+        self.extra_exe_manager.stop_all()
+
     def run(self):
         logger.info("=" * 50)
         logger.info("   Claude 自动启动器")
         logger.info("=" * 50)
 
-        # 0. 确保 WSL 已启动（Claude VM 需要）
-        self.ensure_wsl_running()
+        # 0. 确保 WSL 已启动（Claude VM 需要）— 不阻止启动
+        if not self.ensure_wsl_running():
+            logger.warning("WSL 未就绪，Claude VM 沙盒功能可能不可用")
+            # 继续启动，不中断
 
         # 1. 加载配置
         if not self.load_config():
             return False
 
-        # 2. 设置代理环境变量
+        # 2. 配置验证（不阻止启动）
+        if not validate_config_schema(self.config, ('paths.python', 'paths.proxy_script', 'ports.proxy_port'), context='launcher'):
+            logger.warning("配置验证失败，但继续尝试启动")
+
+        # 3. 设置代理环境变量
         if self.config.get('proxy_settings', {}).get('enabled', False):
             os.environ['HTTP_PROXY'] = self.config['proxy_settings']['http_proxy']
             os.environ['HTTPS_PROXY'] = self.config['proxy_settings']['https_proxy']
             logger.info(f"设置代理环境变量")
 
-        # 3. 启动额外EXE程序
+        # 4. 启动额外EXE程序
         extra_exes = self.config.get('extra_exes', [])
         if not self.extra_exe_manager.start_extra_exes(extra_exes):
             logger.error("额外EXE程序启动失败")
             self.extra_exe_manager.stop_all()
             return False
 
-        # 4. 启动透明代理
+        # 5. 启动透明代理
         if not self.start_proxy():
             self.extra_exe_manager.stop_all()
             return False
 
-        # 5. 启动 Claude
+        # 6. 启动 Claude
         if not self.launch_claude():
-            self.stop_proxy()
-            self.extra_exe_manager.stop_all()
+            self._cleanup()
             return False
 
         logger.info("=" * 50)
@@ -428,22 +409,22 @@ class ClaudeLauncher:
         logger.info("=" * 50)
 
         try:
-            while True:
-                time.sleep(0.5)
+            self._stop_event.wait()
         except KeyboardInterrupt:
             logger.info("\n收到中断信号...")
+            self._stop_event.set()
         finally:
-            self.stop_proxy()
-            self.stop_wsl_keeper()
-            self.extra_exe_manager.stop_all()
+            self._cleanup()
 
         return True
 
 
 def main():
-    launcher = ClaudeLauncher("config.yaml")
+    config_path = sys.argv[1] if len(sys.argv) > 1 else "config.yaml"
+    launcher = ClaudeLauncher(config_path)
     success = launcher.run()
     sys.exit(0 if success else 1)
+
 
 if __name__ == "__main__":
     main()

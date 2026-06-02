@@ -6,5 +6,6 @@ model_config.yaml
 __pycache__/
 
 .codegraph/
+.vscode/
 
 CLAUDE.MD
