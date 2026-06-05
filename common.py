@@ -27,7 +27,8 @@ DEFAULT_TIER = 'haiku'
 DEFAULT_HOST = '127.0.0.1'
 PORT_CHECK_TIMEOUT = 1.0          # 端口探测超时（秒）
 PORT_WAIT_INTERVAL = 0.5          # 端口轮询间隔（秒）
-DEFAULT_PORT_WAIT_TIMEOUT = 30    # 默认端口等待超时（秒）
+PORT_WAIT_TIMEOUT = 30            # 端口等待超时（秒）
+DEFAULT_PORT_WAIT_TIMEOUT = PORT_WAIT_TIMEOUT  # 默认端口等待超时（秒）
 
 # 进程
 PROCESS_TERMINATE_TIMEOUT = 5     # terminate 后等待超时（秒）
@@ -70,6 +71,30 @@ class _CleanFileFormatter(logging.Formatter):
     """文件日志 Formatter：自动去除 ANSI 颜色码和 emoji。"""
     def format(self, record):
         return strip_ansi_and_emoji(super().format(record))
+
+
+# ============================================================================
+# 日志清理
+# ============================================================================
+
+LOG_RETENTION_DAYS = 7  # 日志保留天数
+
+def cleanup_old_logs(log_dir: Path, prefix: str, keep_days: int = LOG_RETENTION_DAYS):
+    """删除超过 keep_days 天的旧日志文件。"""
+    if not log_dir.exists():
+        return
+    cutoff = time.time() - keep_days * 86400
+    log_pattern = f"{prefix}_*.log"
+    deleted = 0
+    for f in sorted(log_dir.glob(log_pattern)):
+        try:
+            if f.stat().st_mtime < cutoff:
+                f.unlink()
+                deleted += 1
+        except Exception:
+            pass
+    if deleted:
+        logging.getLogger(__name__).info(f"清理了 {deleted} 个超过 {keep_days} 天的旧日志")
 
 
 # ============================================================================
@@ -119,6 +144,7 @@ def setup_logging(
     )
     logger = logging.getLogger(name)
     logger.info(f"日志文件: {log_file}")
+    cleanup_old_logs(log_dir, log_prefix)
     return logger
 
 

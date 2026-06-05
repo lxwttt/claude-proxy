@@ -27,7 +27,7 @@ from common import (
 # ========== 全局变量 ==========
 current_config = {}
 script_dir = os.path.dirname(os.path.abspath(__file__))
-config_file_path = os.path.join(script_dir, "model_config.yaml")
+config_file_path = os.path.join(script_dir, "config", "model_config.yaml")
 DEBUG_MODE = False
 _config_lock = threading.Lock()
 
@@ -210,7 +210,11 @@ class SmartProxy(BaseHTTPRequestHandler):
 
 
 def keyboard_listener(server):
-    """监听键盘输入，支持热加载配置"""
+    """监听键盘输入，支持热加载配置（仅在终端独立运行时生效）"""
+    if not sys.stdin.isatty():
+        return  # 非终端模式（如被 launch.py 子进程启动），跳过键盘监听
+
+    print()  # 换行，避免干扰启动日志
     while True:
         try:
             cmd = input().strip().lower()
@@ -222,9 +226,13 @@ def keyboard_listener(server):
         if cmd == 'r':
             logger.info("正在重新加载配置...")
             if load_config():
-                logger.warning("配置热更新成功")  # warning 才能在控制台显示
+                logger.warning("配置热更新成功")
             else:
                 logger.warning("配置热更新失败，继续使用当前配置运行")
+        elif cmd == 'q':
+            logger.info("接收到退出指令，正在关闭服务器...")
+            server.shutdown()
+            sys.exit(0)
 
 
 if __name__ == '__main__':
@@ -239,7 +247,7 @@ if __name__ == '__main__':
     listener_thread.start()
 
     logger.info(f"代理已启动，监听 http://127.0.0.1:8899")
-    logger.info(f"按键指令 -> 'r' 重载配置")
+    logger.info(f"按键指令 -> 'r' 重载配置 | 'q' 退出")
 
     try:
         httpd.serve_forever()

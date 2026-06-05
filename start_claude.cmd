@@ -9,10 +9,19 @@ echo ============================================
 cd /d "%~dp0"
 
 REM ===== 1. 检查必需文件 =====
-if not exist "config.yaml" (
+if not exist "config\config.yaml" (
     echo.
-    echo [!!] config.yaml 不存在
-    echo     请复制 sample_config.yaml 为 config.yaml 并修改配置
+    echo [!!] config\config.yaml 不存在
+    echo     请复制 config\sample_config.yaml 为 config\config.yaml 并修改配置
+    echo.
+    pause
+    exit /b 1
+)
+
+if not exist "config\model_config.yaml" (
+    echo.
+    echo [!!] config\model_config.yaml 不存在
+    echo     请复制 config\sample_model_config.yaml 为 config\model_config.yaml 并修改配置
     echo.
     pause
     exit /b 1
@@ -27,7 +36,7 @@ if not exist "launch.py" (
 
 REM ===== 2. 从 config.yaml 提取 Python 路径 =====
 set PYTHON_CFG=
-for /f "tokens=2" %%i in ('findstr /b /c:"  python:" config.yaml') do set "PYTHON_CFG=%%i"
+for /f "tokens=2" %%i in ('findstr /b /c:"  python:" config\config.yaml') do set "PYTHON_CFG=%%i"
 
 set PYTHON_PATH=python
 if defined PYTHON_CFG set "PYTHON_PATH=%PYTHON_CFG:"=%"
@@ -45,7 +54,7 @@ if "%PYTHON_PATH%"=="python" (
 if %PYTHON_OK%==0 (
     echo.
     echo [!!] Python 不可用: %PYTHON_PATH%
-    echo     请检查 config.yaml 中的 python 路径配置
+    echo     请检查 config\config.yaml 中的 python 路径配置
     pause
     exit /b 1
 )
@@ -57,15 +66,15 @@ echo.
 
 REM ===== 4. 启动 launch.py =====
 %PYTHON_PATH% launch.py
+set LAUNCH_EXIT=%errorlevel%
 
-if errorlevel 1 (
+if %LAUNCH_EXIT%==0 (
     echo.
-    echo [!!] 程序异常退出，请检查上方信息或查看 logs\ 目录
-    pause
-    exit /b 1
+    echo [OK] 所有组件正常退出
+    echo     日志: logs\ 目录
+) else (
+    echo.
+    echo [!!] 程序异常退出 (错误码: %LAUNCH_EXIT%)
+    echo     请检查上方信息或查看 logs 目录
 )
-
-echo.
-echo [OK] 所有组件已成功启动
-echo     日志: logs\ 目录
 pause

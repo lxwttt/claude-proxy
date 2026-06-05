@@ -26,8 +26,18 @@ local_proxy.py  (运行在 127.0.0.1:8899)
   ├─ 接收 Claude 的 API 请求
   ├─ 模型名称映射 (haiku/sonnet/opus → 目标模型)
   ├─ effort 映射 (按模型等级覆写 reasoning effort)
+  ├─ GET / 健康检查，GET /reload 热加载配置
   └─ 转发到目标 API (DeepSeek Anthropic 兼容端点 / OpenAI)
+
+common.py  (共享工具模块)
+  ├─ 统一日志配置（双输出 + 按日轮转 + 自动清理）
+  ├─ 端口探测与等待
+  ├─ 进程管理（启动、优雅终止、强制终止）
+  ├─ 配置验证工具
+  └─ 常量定义（模型 tier、超时等）
 ```
+
+`launch.py` 和 `local_proxy.py` 均通过 `common.py` 共享日志、端口检查、进程管理等基础设施。
 
 ## 文件结构
 
@@ -35,11 +45,12 @@ local_proxy.py  (运行在 127.0.0.1:8899)
 |---|---|
 | `launch.py` | 主启动器 — 编排 WSL、VPN、代理、Claude 的启动顺序 |
 | `local_proxy.py` | API 转发代理 — HTTP 服务器，模型名映射 + effort 映射 + 请求转发 |
-| `config.yaml` | 启动器配置 — Python 路径、端口、额外 EXE（从 `sample_config.yaml` 复制） |
-| `model_config.yaml` | API 转发配置 — 后端选择、API Key、模型映射、effort 映射（从 `sample_model_config.yaml` 复制） |
+| `common.py` | 共享工具模块 — 日志、端口检查、进程管理、常量 |
+| `config/config.yaml` | 启动器配置 — Python 路径、端口、额外 EXE（从 `config/sample_config.yaml` 复制） |
+| `config/model_config.yaml` | API 转发配置 — 后端选择、API Key、模型映射、effort 映射（从 `config/sample_model_config.yaml` 复制） |
 | `start_claude.cmd` | Windows 批处理入口 — 校验环境后启动 `launch.py` |
-| `sample_config.yaml` | 启动器配置模板 |
-| `sample_model_config.yaml` | 模型配置模板 |
+| `config/sample_config.yaml` | 启动器配置模板 |
+| `config/sample_model_config.yaml` | 模型配置模板 |
 
 ## 前置条件
 
@@ -53,7 +64,7 @@ pip install pyyaml requests
 
 ## 配置方法
 
-### 1. 修改 `config.yaml`
+### 1. 修改 `config/config.yaml`
 
 ```yaml
 paths:
@@ -89,7 +100,7 @@ extra_exes:
 - `proxy_settings` — 设置后将注入 `HTTP_PROXY` 和 `HTTPS_PROXY` 环境变量，使 Claude 的请求经过此代理
 - 如果不需要启动额外 EXE，将 `extra_exes` 设为空列表 `[]`
 
-### 2. 修改 `model_config.yaml`（API 转发配置）
+### 2. 修改 `config/model_config.yaml`（API 转发配置）
 
 ```yaml
 current_setting: "DeepSeek"    # 当前启用的配置名称
@@ -102,8 +113,8 @@ settings:
     api_key: "sk-..."                                     # API Key
     model_mapping:
       haiku: "deepseek-v4-flash"       # Claude 模型 → 目标模型
-      sonnet: "deepseek-v4-pro[1m]"
-      opus: "deepseek-v4-pro[1m]"
+      sonnet: "deepseek-v4-pro"
+      opus: "deepseek-v4-pro"
 
   OpenAI:
     name: "OpenAI"
@@ -135,7 +146,8 @@ effort_mapping:
 
 **热切换：**
 
-`local_proxy.py` 运行中时，在终端按 `r` 键即可热加载 `model_config.yaml`，无需重启。按 `q` 键退出程序。
+- `local_proxy.py` 独立运行时，在终端按 `r` 键即可热加载 `model_config.yaml`，无需重启；按 `q` 键退出程序。
+- 通过 `launch.py` 运行时，在启动器终端按 `r` 键，或通过 HTTP 请求 `GET /reload` 触发配置重载。
 
 ## 使用方法
 
@@ -178,9 +190,12 @@ python launch.py
 
 ### 停止
 
-在运行 `launch.py` 的终端按 **Ctrl+C**，程序会按逆序自动停止：关闭 Claude → 停止转发代理 → 停止额外 EXE。
+**通过 `launch.py` 运行时：** 在终端按 **Ctrl+C**，程序会自动按以下顺序清理：
+1. 停止转发代理（`local_proxy.py` 子进程）
+2. 关闭 WSL VM（`wsl --shutdown`）
+3. 停止所有额外 EXE
 
-如果单独运行 `local_proxy.py`，按 `q` 退出。
+**单独运行 `local_proxy.py` 时：** 按 `q` 退出。
 
 ## 详细组件说明
 
@@ -188,22 +203,34 @@ python launch.py
 
 `ClaudeLauncher` 类按序执行以下步骤：
 
-1. **确保 WSL2 运行** — 检测 WSL 可用性，设置 WSL2 为默认版本，必要时安装 Ubuntu 发行版，通过 VBScript 后台保活 WSL VM（Claude 沙盒功能依赖此 VM）
-2. **加载配置** — 读取 `config.yaml`
+1. **确保 WSL2 运行** — 检测 WSL 可用性，设置 WSL2 为默认版本，如未安装 WSL 发行版，请手动运行 `wsl --install -d Ubuntu`，通过 VBScript 后台保活 WSL VM（Claude 沙盒功能依赖此 VM）
+2. **加载配置** — 读取 `config/config.yaml`
 3. **设置代理环境变量** — 将 `HTTP_PROXY` / `HTTPS_PROXY` 注入当前进程环境
 4. **启动额外 EXE** — `ExtraExeManager` 逐一启动 EXE，等待端口就绪
 5. **启动转发代理** — 以子进程运行 `local_proxy.py`，等待端口 8899 就绪
 6. **启动 Claude** — 通过 App User Model ID 或 EXE 路径启动 Claude
-7. **保持运行** — 等待 Ctrl+C，逆序清理：Claude 进程 → 停止转发代理 → 停止额外 EXE → 关闭 WSL VM
+7. **保持运行** — 等待 Ctrl+C，逆序清理：停止转发代理 → 关闭 WSL VM → 停止额外 EXE
 
 ### local_proxy.py — API 转发代理
 
 一个轻量级多线程 HTTP 服务器（基于 `http.server` + `ThreadingMixIn`），运行在 `127.0.0.1:8899`：
 
 - **GET /** — 健康检查，返回 `{"status": "ok"}`
+- **GET /reload** — 热加载 `model_config.yaml`，返回 `{"reload": "ok"}` 或 `{"reload": "failed"}`
 - **POST /*** — 接收 Claude 的 API 请求，按 `model_mapping` 替换模型名，按 `effort_mapping` 覆写 reasoning effort，转发到 `api_base_url`
 - Debug 模式（`debug_mode: true`）将完整请求/响应写入日志文件 `logs/proxy_YYYYMMDD.log`
-- 运行时按 `r` 热加载 `model_config.yaml`，按 `q` 退出
+- 独立运行时按 `r` 热加载配置，按 `q` 退出
+- 被 `launch.py` 以子进程方式启动时，键盘监听自动禁用，改由 `launch.py` 通过 `GET /reload` 远程触发热加载
+
+### common.py — 共享工具模块
+
+`launch.py` 和 `local_proxy.py` 的公共依赖，提供：
+
+- **统一日志配置** — 双输出日志（控制台 + 文件），按日轮转，文件日志自动去除 ANSI 颜色码和 emoji
+- **端口工具** — `is_port_listening()` 和 `wait_for_port()`，用于探测和等待端口就绪
+- **进程管理** — `start_process()` 启动子进程（支持隐藏窗口），`terminate_process()` 优雅终止（terminate → wait → kill）
+- **配置验证** — `validate_config_schema()` 检查必需字段是否存在
+- **常量** — 模型 tier 关键字（`opus` / `sonnet` / `haiku`）、网络超时、WSL 重试参数等
 
 ### 日志
 
@@ -213,6 +240,8 @@ python launch.py
 - `logs/proxy_YYYYMMDD.log` — local_proxy.py 的完整日志
 
 文件日志自动去除 ANSI 颜色码和 emoji；控制台输出保留。`debug_mode: true` 时，API 请求/响应的完整内容会写入代理日志。
+
+**日志自动清理：** `logs/` 目录保留最近 7 天的日志，超出此期限的文件在每次启动时自动删除。
 
 ### WSL2 VM 保活机制
 

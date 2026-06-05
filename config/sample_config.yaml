@@ -1,0 +1,24 @@
+# sample_config.yaml - 配置模板（复制为 config.yaml 后修改）
+paths:
+  python: "C:/path/to/python.exe" # Python 可执行文件路径
+  proxy_script: "local_proxy.py" # 转发代理脚本路径
+  claude_exe: "" # Claude EXE 路径（可选，二选一，不推荐使用）
+
+ports:
+  proxy_port: 8899 # 转发代理监听端口
+
+app:
+  app_id: "" # Claude 的 App User Model ID（可选，二选一，建议使用）
+
+proxy_settings:
+  enabled: true
+  http_proxy: "http://127.0.0.1:10809" # HTTP 代理地址
+  https_proxy: "http://127.0.0.1:10809" # HTTPS 代理地址
+
+extra_exes:
+  # - name: "VPN" # 显示名称
+  #   path: "C:/path/to/vpn.exe" # EXE 路径
+  #   args: "" # 启动参数
+  #   wait_for_port: 10809 # 等待此端口就绪后继续
+  #   description: "代理软件" # 描述
+  #   required: true # true=启动失败则退出

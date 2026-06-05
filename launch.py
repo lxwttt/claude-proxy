@@ -102,15 +102,15 @@ class ExtraExeManager:
         """停止所有启动的EXE程序"""
         logger.info("停止所有额外EXE程序...")
         for process in self.processes:
-            if process and process.poll() is None:
-                logger.info(f"   停止 PID: {process.pid}")
             terminate_process(process)
         self.processes.clear()
         logger.info("所有额外EXE程序已停止")
 
 
 class ClaudeLauncher:
-    def __init__(self, config_path: str = "config.yaml"):
+    def __init__(self, config_path: str = None):
+        if config_path is None:
+            config_path = os.path.join(os.path.dirname(__file__), "config", "config.yaml")
         self.config_path = config_path
         self.config: Dict[str, Any] = {}
         self.proxy_process: Optional[subprocess.Popen] = None
@@ -385,7 +385,7 @@ class ClaudeLauncher:
         if self.config.get('proxy_settings', {}).get('enabled', False):
             os.environ['HTTP_PROXY'] = self.config['proxy_settings']['http_proxy']
             os.environ['HTTPS_PROXY'] = self.config['proxy_settings']['https_proxy']
-            logger.info(f"设置代理环境变量")
+            logger.info("设置代理环境变量")
 
         # 4. 启动额外EXE程序
         extra_exes = self.config.get('extra_exes', [])
@@ -413,6 +413,7 @@ class ClaudeLauncher:
         _reload_url = f"http://127.0.0.1:{self.config['ports']['proxy_port']}/reload"
         logger.info("   按 r 刷新代理配置 | 按 Ctrl+C 停止所有程序")
 
+        _ok = True
         try:
             while True:
                 if msvcrt.kbhit():
@@ -430,14 +431,15 @@ class ClaudeLauncher:
                 time.sleep(0.1)
         except KeyboardInterrupt:
             logger.info("\n收到中断信号...")
+            _ok = False
         finally:
             self._cleanup()
 
-        return True
+        return _ok
 
 
 def main():
-    config_path = sys.argv[1] if len(sys.argv) > 1 else "config.yaml"
+    config_path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(__file__), "config", "config.yaml")
     launcher = ClaudeLauncher(config_path)
     success = launcher.run()
     sys.exit(0 if success else 1)
