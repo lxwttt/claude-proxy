@@ -88,7 +88,16 @@ class SmartProxy(BaseHTTPRequestHandler):
         pass  # 关闭 http.server 自带混乱日志
 
     def do_GET(self):
-        """GET 探针"""
+        """GET 探针 / 配置热加载"""
+        if self.path == '/reload':
+            ok = load_config()
+            self.send_response(200 if ok else 500)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps(
+                {"reload": "ok" if ok else "failed"}, ensure_ascii=False
+            ).encode())
+            return
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
         self.end_headers()
@@ -216,10 +225,6 @@ def keyboard_listener(server):
                 logger.warning("配置热更新成功")  # warning 才能在控制台显示
             else:
                 logger.warning("配置热更新失败，继续使用当前配置运行")
-        elif cmd == 'q':
-            logger.info("接收到退出指令，正在关闭服务器...")
-            server.shutdown()
-            sys.exit(0)
 
 
 if __name__ == '__main__':
@@ -234,7 +239,7 @@ if __name__ == '__main__':
     listener_thread.start()
 
     logger.info(f"代理已启动，监听 http://127.0.0.1:8899")
-    logger.info(f"按键指令 -> 'r' 重载配置，'q' 退出")
+    logger.info(f"按键指令 -> 'r' 重载配置")
 
     try:
         httpd.serve_forever()

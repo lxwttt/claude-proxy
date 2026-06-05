@@ -10,6 +10,8 @@ import time
 import yaml
 import subprocess
 import logging
+import msvcrt
+import requests
 import threading
 from pathlib import Path
 from typing import Optional, Dict, Any, List
@@ -28,7 +30,7 @@ from common import (
 )
 
 # ========== 常量 ==========
-PROXY_START_TIMEOUT = 30
+PORT_WAIT_TIMEOUT = 30
 
 # ========== 日志 ==========
 logger = setup_logging(__name__, log_prefix='launcher', console_level=logging.INFO)
@@ -84,7 +86,7 @@ class ExtraExeManager:
             logger.info(f"{name} 启动成功 (PID: {process.pid})")
 
             if wait_port > 0:
-                if not wait_for_port(wait_port, timeout=PROXY_START_TIMEOUT):
+                if not wait_for_port(wait_port, timeout=PORT_WAIT_TIMEOUT):
                     if required:
                         logger.error(f"{name} 端口 {wait_port} 启动失败")
                         return False
@@ -113,7 +115,6 @@ class ClaudeLauncher:
         self.config: Dict[str, Any] = {}
         self.proxy_process: Optional[subprocess.Popen] = None
         self.extra_exe_manager = ExtraExeManager()
-        self._stop_event = threading.Event()
 
     def load_config(self) -> bool:
         try:
@@ -305,7 +306,7 @@ class ClaudeLauncher:
 
             proxy_port = self.config['ports']['proxy_port']
             if not wait_for_port(proxy_port, label='proxy'):
-                logger.error(f"代理在 {PROXY_START_TIMEOUT} 秒内未能启动")
+                logger.error(f"代理在 {PORT_WAIT_TIMEOUT} 秒内未能启动")
                 self.stop_proxy()
                 return False
 
@@ -408,11 +409,27 @@ class ClaudeLauncher:
         logger.info("   按 Ctrl+C 停止所有程序")
         logger.info("=" * 50)
 
+        # 主循环：轮询按键 + 响应 Ctrl+C
+        _reload_url = f"http://127.0.0.1:{self.config['ports']['proxy_port']}/reload"
+        logger.info("   按 r 刷新代理配置 | 按 Ctrl+C 停止所有程序")
+
         try:
-            self._stop_event.wait()
+            while True:
+                if msvcrt.kbhit():
+                    key = msvcrt.getch().lower()
+                    if key == b'r':
+                        logger.info("正在刷新代理配置...")
+                        try:
+                            resp = requests.get(_reload_url, timeout=5)
+                            if resp.status_code == 200:
+                                logger.info("[OK] 代理配置已刷新")
+                            else:
+                                logger.warning("[FAIL] 代理配置刷新失败")
+                        except Exception as e:
+                            logger.warning(f"[FAIL] 无法连接代理: {e}")
+                time.sleep(0.1)
         except KeyboardInterrupt:
             logger.info("\n收到中断信号...")
-            self._stop_event.set()
         finally:
             self._cleanup()
 

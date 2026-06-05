@@ -205,17 +205,21 @@ def start_process(
     cmd: list,
     cwd: Optional[str] = None,
     hide_window: bool = True,
+    stdin: Optional[int] = None,
 ) -> Optional[subprocess.Popen]:
     """
     启动子进程，返回 Popen 对象。失败返回 None。
 
     hide_window: Windows 下隐藏控制台窗口。
+    stdin: 标准输入，默认 None（继承父进程）。
     """
     try:
         kwargs = dict(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        if stdin is not None:
+            kwargs['stdin'] = stdin
         if hide_window and os.name == 'nt':
             kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
         if cwd:
