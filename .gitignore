@@ -7,5 +7,6 @@ __pycache__/
 
 .codegraph/
 .vscode/
+.claude/
 
 CLAUDE.MD
