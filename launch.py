@@ -262,7 +262,9 @@ class ClaudeLauncher:
         if not self._start_wsl_keeper():
             return False
 
-        self._verify_wsl_running()  # 非阻塞，内部已自吞异常
+        # 前 4 步是硬性要求（失败已 return False）；此步仅最终确认：
+        # WSL 异步初始化可能较慢，keeper 已启动，确认不到只告警不中止，避免误杀慢启动
+        self._verify_wsl_running()
         return True
 
     def stop_wsl_keeper(self):
@@ -373,10 +375,12 @@ class ClaudeLauncher:
         # 启动阶段整体包裹：任何未预期异常（含启动期 Ctrl+C / 伪 KeyboardInterrupt）
         # 都清理已启动组件后退出，绝不留下孤儿进程、绝不静默崩溃
         try:
-            # 0. 确保 WSL 已启动（Claude VM 需要）— 不阻止启动
+            # 0. 确保 WSL 已就绪——Windows 上 Claude VM 沙盒必需，失败即中止
+            #    （ensure_wsl_running 在非 Windows 直接返回 True，不影响其他平台）
             if not self.ensure_wsl_running():
-                logger.warning("WSL 未就绪，Claude VM 沙盒功能可能不可用")
-                # 继续启动，不中断
+                logger.error("WSL 未就绪——Windows 上 Claude VM 沙盒依赖 WSL，无法继续")
+                self._cleanup()
+                return False
 
             # 1. 加载配置
             if not self.load_config():
