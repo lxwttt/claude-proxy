@@ -297,6 +297,7 @@ class ClaudeLauncher:
             self.proxy_process = start_process(
                 [python_path, proxy_script],
                 cwd=str(Path(proxy_script).parent),
+                stdin=subprocess.DEVNULL,
             )
             if self.proxy_process is None:
                 logger.error("代理进程启动失败")
