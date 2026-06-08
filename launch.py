@@ -136,11 +136,23 @@ class ClaudeLauncher:
     # WSL 管理 - 子方法
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _run_wsl(args, timeout, **kwargs):
+        """统一执行 wsl 子命令。
+
+        关键：始终带 CREATE_NO_WINDOW，让 wsl.exe 拥有独立控制台。
+        否则 wsl.exe 共享父进程控制台，会在 VM 初始化的不稳定期向整个
+        控制台进程组广播 CTRL_C/CTRL_BREAK，被 launch.py 当成伪 KeyboardInterrupt
+        （历史问题：启动期莫名"收到中断信号"直接退出）。
+        """
+        creationflags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+        return subprocess.run(['wsl', *args], creationflags=creationflags, timeout=timeout, **kwargs)
+
     def _check_wsl_available(self) -> bool:
         """检查 wsl.exe 是否存在且可用。"""
         try:
-            probe = subprocess.run(
-                ['wsl', '--version'],
+            probe = self._run_wsl(
+                ['--version'],
                 capture_output=True, encoding='utf-8', errors='replace', timeout=10
             )
             if probe.returncode != 0:
@@ -157,15 +169,15 @@ class ClaudeLauncher:
     def _ensure_wsl2_default(self) -> bool:
         """确认 WSL2 是默认版本（不是 WSL1）。"""
         # 1. 确认 WSL2 是默认版本
-        status = subprocess.run(
-            ['wsl', '--status'],
+        status = self._run_wsl(
+            ['--status'],
             capture_output=True, encoding='utf-8', errors='replace', timeout=10
         )
         if 'Default Version: 2' not in status.stdout:
             logger.warning("WSL 默认版本不是 2，VM 需要 WSL2")
             logger.info("尝试设置为 WSL2...")
-            set_result = subprocess.run(
-                ['wsl', '--set-default-version', '2'],
+            set_result = self._run_wsl(
+                ['--set-default-version', '2'],
                 capture_output=True, encoding='utf-8', errors='replace', timeout=30
             )
             if set_result.returncode != 0:
@@ -176,8 +188,8 @@ class ClaudeLauncher:
 
     def _ensure_wsl_distro_exists(self) -> bool:
         """检查 WSL 发行版是否已安装。"""
-        distro_result = subprocess.run(
-            ['wsl', '-l', '-v'],
+        distro_result = self._run_wsl(
+            ['-l', '-v'],
             capture_output=True, encoding='utf-8', errors='replace', timeout=10
         )
         if distro_result.returncode == 0 and len(distro_result.stdout.strip().split('\n')) <= 1:
@@ -215,8 +227,8 @@ class ClaudeLauncher:
         此方法绝不抛异常——任何错误都降级为 warning 并返回 False。"""
         for attempt in range(WSL_VERIFY_ATTEMPTS):
             try:
-                verify = subprocess.run(
-                    ['wsl', '-l', '--running'],
+                verify = self._run_wsl(
+                    ['-l', '--running'],
                     capture_output=True, timeout=10
                 )
             except subprocess.TimeoutExpired:
@@ -273,10 +285,7 @@ class ClaudeLauncher:
         """停止 WSL 后台 VM（VBS 启动的 sleep infinity 不是 Python 子进程，直接用 shutdown）"""
         logger.info("停止 WSL VM...")
         try:
-            subprocess.run(
-                ['wsl', '--shutdown'],
-                capture_output=True, timeout=15
-            )
+            self._run_wsl(['--shutdown'], capture_output=True, timeout=15)
             logger.info("WSL VM 已停止")
         except Exception as e:
             logger.warning("WSL shutdown 失败: {}".format(e))
@@ -377,39 +386,51 @@ class ClaudeLauncher:
         logger.info("   Claude 自动启动器")
         logger.info("=" * 50)
 
-        # 0. 确保 WSL 已启动（Claude VM 需要）— 不阻止启动
-        if not self.ensure_wsl_running():
-            logger.warning("WSL 未就绪，Claude VM 沙盒功能可能不可用")
-            # 继续启动，不中断
+        # 启动阶段整体包裹：任何未预期异常（含启动期 Ctrl+C / 伪 KeyboardInterrupt）
+        # 都清理已启动组件后退出，绝不留下孤儿进程、绝不静默崩溃
+        try:
+            # 0. 确保 WSL 已启动（Claude VM 需要）— 不阻止启动
+            if not self.ensure_wsl_running():
+                logger.warning("WSL 未就绪，Claude VM 沙盒功能可能不可用")
+                # 继续启动，不中断
 
-        # 1. 加载配置
-        if not self.load_config():
+            # 1. 加载配置
+            if not self.load_config():
+                self._cleanup()
+                return False
+
+            # 2. 配置验证（不阻止启动）
+            if not validate_config_schema(self.config, ('paths.python', 'paths.proxy_script', 'ports.proxy_port'), context='launcher'):
+                logger.warning("配置验证失败，但继续尝试启动")
+
+            # 3. 设置代理环境变量
+            if self.config.get('proxy_settings', {}).get('enabled', False):
+                os.environ['HTTP_PROXY'] = self.config['proxy_settings']['http_proxy']
+                os.environ['HTTPS_PROXY'] = self.config['proxy_settings']['https_proxy']
+                logger.info("设置代理环境变量")
+
+            # 4. 启动额外EXE程序
+            extra_exes = self.config.get('extra_exes', [])
+            if not self.extra_exe_manager.start_extra_exes(extra_exes):
+                logger.error("额外EXE程序启动失败")
+                self._cleanup()
+                return False
+
+            # 5. 启动透明代理
+            if not self.start_proxy():
+                self._cleanup()
+                return False
+
+            # 6. 启动 Claude
+            if not self.launch_claude():
+                self._cleanup()
+                return False
+        except KeyboardInterrupt:
+            logger.warning("启动期间收到中断信号，正在清理已启动组件...")
+            self._cleanup()
             return False
-
-        # 2. 配置验证（不阻止启动）
-        if not validate_config_schema(self.config, ('paths.python', 'paths.proxy_script', 'ports.proxy_port'), context='launcher'):
-            logger.warning("配置验证失败，但继续尝试启动")
-
-        # 3. 设置代理环境变量
-        if self.config.get('proxy_settings', {}).get('enabled', False):
-            os.environ['HTTP_PROXY'] = self.config['proxy_settings']['http_proxy']
-            os.environ['HTTPS_PROXY'] = self.config['proxy_settings']['https_proxy']
-            logger.info("设置代理环境变量")
-
-        # 4. 启动额外EXE程序
-        extra_exes = self.config.get('extra_exes', [])
-        if not self.extra_exe_manager.start_extra_exes(extra_exes):
-            logger.error("额外EXE程序启动失败")
-            self.extra_exe_manager.stop_all()
-            return False
-
-        # 5. 启动透明代理
-        if not self.start_proxy():
-            self.extra_exe_manager.stop_all()
-            return False
-
-        # 6. 启动 Claude
-        if not self.launch_claude():
+        except Exception:
+            logger.error("启动期间发生未预期异常，正在清理后退出", exc_info=True)
             self._cleanup()
             return False
 
