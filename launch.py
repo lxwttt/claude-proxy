@@ -410,11 +410,12 @@ class ClaudeLauncher:
         logger.info("   按 Ctrl+C 停止所有程序")
         logger.info("=" * 50)
 
-        # 主循环：轮询按键 + 响应 Ctrl+C
+        # 主循环：轮询按键 + 响应 Ctrl+C + 子进程存活监控
         _reload_url = f"http://127.0.0.1:{self.config['ports']['proxy_port']}/reload"
         logger.info("   按 r 刷新代理配置 | 按 Ctrl+C 停止所有程序")
 
         _ok = True
+        _health_tick = 0
         try:
             while True:
                 if msvcrt.kbhit():
@@ -429,6 +430,20 @@ class ClaudeLauncher:
                                 logger.warning("[FAIL] 代理配置刷新失败")
                         except Exception as e:
                             logger.warning(f"[FAIL] 无法连接代理: {e}")
+
+                # 每 5 秒检查子进程存活
+                _health_tick += 1
+                if _health_tick >= 50:
+                    _health_tick = 0
+                    if self.proxy_process and self.proxy_process.poll() is not None:
+                        logger.critical("代理进程意外退出！正在停止所有组件...")
+                        _ok = False
+                        break
+                    if not is_port_listening(self.config['ports']['proxy_port']):
+                        logger.critical("代理端口无响应！正在停止所有组件...")
+                        _ok = False
+                        break
+
                 time.sleep(0.1)
         except KeyboardInterrupt:
             logger.info("\n收到中断信号...")
