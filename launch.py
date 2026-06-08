@@ -227,29 +227,16 @@ class ClaudeLauncher:
         此方法绝不抛异常——任何错误都降级为 warning 并返回 False。"""
         for attempt in range(WSL_VERIFY_ATTEMPTS):
             try:
-                verify = self._run_wsl(
-                    ['-l', '--running'],
-                    capture_output=True, timeout=10
-                )
-            except subprocess.TimeoutExpired:
-                logger.warning("WSL 运行状态查询超时（尝试 {}/{}）".format(attempt + 1, WSL_VERIFY_ATTEMPTS))
+                verify = self._run_wsl(['-l', '--running'], capture_output=True, timeout=10)
+            except Exception as e:
+                logger.warning(f"WSL 状态查询失败（{attempt + 1}/{WSL_VERIFY_ATTEMPTS}）: {e}")
                 time.sleep(WSL_VERIFY_INTERVAL)
                 continue
-            except Exception:
-                logger.warning("WSL 运行状态查询异常（尝试 {}/{}），跳过".format(attempt + 1, WSL_VERIFY_ATTEMPTS))
-                time.sleep(WSL_VERIFY_INTERVAL)
-                continue
-            if verify.returncode == 1:
-                logger.warning("WSL 无运行中的发行版（首次启动初始化中），重试...")
-                time.sleep(WSL_VERIFY_INTERVAL)
-                continue
-            elif verify.returncode != 0:
-                logger.warning("WSL 运行状态查询异常 (返回码 {}，尝试 {}/{})".format(
-                    verify.returncode, attempt + 1, WSL_VERIFY_ATTEMPTS))
-                time.sleep(WSL_VERIFY_INTERVAL)
-                continue
-            logger.info("WSL 2 VM 运行确认成功")
-            return True
+            if verify.returncode == 0:
+                logger.info("WSL 2 VM 运行确认成功")
+                return True
+            logger.warning(f"WSL 尚无运行中的发行版（{attempt + 1}/{WSL_VERIFY_ATTEMPTS}），重试...")
+            time.sleep(WSL_VERIFY_INTERVAL)
 
         logger.warning("WSL 运行验证超时（{}次尝试均失败），但 WSL 可能仍在初始化中".format(WSL_VERIFY_ATTEMPTS))
         return False
@@ -275,10 +262,7 @@ class ClaudeLauncher:
         if not self._start_wsl_keeper():
             return False
 
-        try:
-            self._verify_wsl_running()
-        except Exception:
-            logger.warning("WSL 验证异常，跳过（VM 可能仍在初始化中）")
+        self._verify_wsl_running()  # 非阻塞，内部已自吞异常
         return True
 
     def stop_wsl_keeper(self):
