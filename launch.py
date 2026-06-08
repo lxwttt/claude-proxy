@@ -31,6 +31,8 @@ from common import (
 
 # ========== 常量 ==========
 PORT_WAIT_TIMEOUT = 30
+HEALTH_CHECK_INTERVAL = 5      # 代理存活检查间隔（秒）
+PROXY_PORT_FAIL_LIMIT = 3      # 端口连续无响应多少次才判定代理失效（去抖，防瞬时抖动误杀）
 
 # ========== 日志 ==========
 logger = setup_logging(__name__, log_prefix='launcher', console_level=logging.INFO)
@@ -148,6 +150,14 @@ class ClaudeLauncher:
         creationflags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
         return subprocess.run(['wsl', *args], creationflags=creationflags, timeout=timeout, **kwargs)
 
+    def _run_wsl_safe(self, args, timeout, **kwargs):
+        """运行 wsl 子命令，异常时记录 warning 并返回 None（统一错误处理，避免各调用方重复 try/except）。"""
+        try:
+            return self._run_wsl(args, timeout=timeout, **kwargs)
+        except Exception as e:
+            logger.warning(f"wsl {' '.join(args)} 执行失败: {e}")
+            return None
+
     def _check_wsl_available(self) -> bool:
         """检查 wsl.exe 是否存在且可用。"""
         try:
@@ -167,33 +177,22 @@ class ClaudeLauncher:
         return True
 
     def _ensure_wsl2_default(self) -> bool:
-        """确认 WSL2 是默认版本（不是 WSL1）。"""
-        # 1. 确认 WSL2 是默认版本
-        status = self._run_wsl(
-            ['--status'],
-            capture_output=True, encoding='utf-8', errors='replace', timeout=10
-        )
-        if 'Default Version: 2' not in status.stdout:
-            logger.warning("WSL 默认版本不是 2，VM 需要 WSL2")
-            logger.info("尝试设置为 WSL2...")
-            set_result = self._run_wsl(
-                ['--set-default-version', '2'],
-                capture_output=True, encoding='utf-8', errors='replace', timeout=30
-            )
-            if set_result.returncode != 0:
-                logger.error("无法设置 WSL2 为默认版本，VM 不可用")
-                return False
-            logger.info("WSL2 已设为默认版本")
+        """确保 WSL2 为默认版本。直接幂等设置，避免解析 wsl --status 的本地化/UTF-16 输出。"""
+        result = self._run_wsl_safe(['--set-default-version', '2'], timeout=30,
+                                    capture_output=True, encoding='utf-8', errors='replace')
+        if result is None:
+            return False
+        if result.returncode != 0:
+            logger.error("无法设置 WSL2 为默认版本，VM 不可用")
+            return False
         return True
 
     def _ensure_wsl_distro_exists(self) -> bool:
         """检查 WSL 发行版是否已安装。"""
-        distro_result = self._run_wsl(
-            ['-l', '-v'],
-            capture_output=True, encoding='utf-8', errors='replace', timeout=10
-        )
-        if distro_result.returncode == 0 and len(distro_result.stdout.strip().split('\n')) <= 1:
-            logger.warning("没有安装任何 WSL 发行版，VM 需要至少一个发行版")
+        result = self._run_wsl_safe(['-l', '-v'], timeout=10, capture_output=True, encoding='utf-8', errors='replace')
+        if result is None:
+            return False
+        if result.returncode == 0 and len(result.stdout.strip().split('\n')) <= 1:
             logger.error("未安装 WSL 发行版，VM 功能不可用。请手动运行: wsl --install -d Ubuntu")
             return False
         return True
@@ -219,12 +218,12 @@ class ClaudeLauncher:
             logger.info("WSL keep-alive 已通过 VBS 后台启动")
             return True
         except Exception as e:
-            logger.warning("WSL keep-alive 启动失败: {}".format(e))
+            logger.warning(f"WSL keep-alive 启动失败: {e}")
             return False
 
     def _verify_wsl_running(self) -> bool:
         """验证 WSL 确实运行中（VBS 启动后需要等 WSL 初始化完成）。
-        此方法绝不抛异常——任何错误都降级为 warning 并返回 False。"""
+        除 KeyboardInterrupt 外不抛异常——其余错误降级为 warning 并返回 False（让真正的中断能传播到上层清理）。"""
         for attempt in range(WSL_VERIFY_ATTEMPTS):
             try:
                 verify = self._run_wsl(['-l', '--running'], capture_output=True, timeout=10)
@@ -238,7 +237,7 @@ class ClaudeLauncher:
             logger.warning(f"WSL 尚无运行中的发行版（{attempt + 1}/{WSL_VERIFY_ATTEMPTS}），重试...")
             time.sleep(WSL_VERIFY_INTERVAL)
 
-        logger.warning("WSL 运行验证超时（{}次尝试均失败），但 WSL 可能仍在初始化中".format(WSL_VERIFY_ATTEMPTS))
+        logger.warning(f"WSL 运行验证超时（{WSL_VERIFY_ATTEMPTS}次尝试均失败），但 WSL 可能仍在初始化中")
         return False
 
     # ------------------------------------------------------------------
@@ -270,11 +269,8 @@ class ClaudeLauncher:
     def stop_wsl_keeper(self):
         """停止 WSL 后台 VM（VBS 启动的 sleep infinity 不是 Python 子进程，直接用 shutdown）"""
         logger.info("停止 WSL VM...")
-        try:
-            self._run_wsl(['--shutdown'], capture_output=True, timeout=15)
+        if self._run_wsl_safe(['--shutdown'], timeout=15, capture_output=True) is not None:
             logger.info("WSL VM 已停止")
-        except Exception as e:
-            logger.warning("WSL shutdown 失败: {}".format(e))
 
     # ------------------------------------------------------------------
     # 代理管理
@@ -432,7 +428,8 @@ class ClaudeLauncher:
         logger.info("   按 r 刷新代理配置 | 按 Ctrl+C 停止所有程序")
 
         _ok = True
-        _health_tick = 0
+        _last_health = time.time()
+        _port_fails = 0
         try:
             while True:
                 if msvcrt.kbhit():
@@ -448,18 +445,24 @@ class ClaudeLauncher:
                         except Exception as e:
                             logger.warning(f"[FAIL] 无法连接代理: {e}")
 
-                # 每 5 秒检查子进程存活
-                _health_tick += 1
-                if _health_tick >= 50:
-                    _health_tick = 0
+                # 定期检查代理存活
+                if time.time() - _last_health >= HEALTH_CHECK_INTERVAL:
+                    _last_health = time.time()
+                    # 进程退出是确定信号，立即判定
                     if self.proxy_process and self.proxy_process.poll() is not None:
                         logger.critical("代理进程意外退出！正在停止所有组件...")
                         _ok = False
                         break
-                    if not is_port_listening(self.config['ports']['proxy_port']):
-                        logger.critical("代理端口无响应！正在停止所有组件...")
-                        _ok = False
-                        break
+                    # 端口无响应可能是瞬时抖动，需连续多次失败才判死，避免误杀
+                    if is_port_listening(self.config['ports']['proxy_port']):
+                        _port_fails = 0
+                    else:
+                        _port_fails += 1
+                        logger.warning(f"代理端口无响应（{_port_fails}/{PROXY_PORT_FAIL_LIMIT}）...")
+                        if _port_fails >= PROXY_PORT_FAIL_LIMIT:
+                            logger.critical("代理端口连续无响应，正在停止所有组件...")
+                            _ok = False
+                            break
 
                 time.sleep(0.1)
         except KeyboardInterrupt:
