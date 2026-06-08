@@ -211,7 +211,8 @@ class ClaudeLauncher:
             return False
 
     def _verify_wsl_running(self) -> bool:
-        """验证 WSL 确实运行中（VBS 启动后需要等 WSL 初始化完成）。"""
+        """验证 WSL 确实运行中（VBS 启动后需要等 WSL 初始化完成）。
+        此方法绝不抛异常——任何错误都降级为 warning 并返回 False。"""
         for attempt in range(WSL_VERIFY_ATTEMPTS):
             try:
                 verify = subprocess.run(
@@ -220,6 +221,10 @@ class ClaudeLauncher:
                 )
             except subprocess.TimeoutExpired:
                 logger.warning("WSL 运行状态查询超时（尝试 {}/{}）".format(attempt + 1, WSL_VERIFY_ATTEMPTS))
+                time.sleep(WSL_VERIFY_INTERVAL)
+                continue
+            except Exception:
+                logger.warning("WSL 运行状态查询异常（尝试 {}/{}），跳过".format(attempt + 1, WSL_VERIFY_ATTEMPTS))
                 time.sleep(WSL_VERIFY_INTERVAL)
                 continue
             if verify.returncode == 1:
@@ -258,7 +263,10 @@ class ClaudeLauncher:
         if not self._start_wsl_keeper():
             return False
 
-        self._verify_wsl_running()  # 验证失败不阻止继续
+        try:
+            self._verify_wsl_running()
+        except Exception:
+            logger.warning("WSL 验证异常，跳过（VM 可能仍在初始化中）")
         return True
 
     def stop_wsl_keeper(self):
