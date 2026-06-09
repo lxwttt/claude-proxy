@@ -7,7 +7,7 @@
 1. **WSL2 VM 保活** — 自动检测并保持 WSL2 运行（Claude 沙盒 VM 的前提）
 2. **自动启动代理软件** — 启动额外 EXE（VPN 等），等待端口就绪
 3. **挂载系统代理** — 设置 `HTTP_PROXY` / `HTTPS_PROXY` 环境变量
-4. **API 转发代理** — 本地 HTTP 服务器拦截 Claude 的 API 请求，完成模型名映射 + effort 映射后转发到第三方后端
+4. **API 转发代理** — 本地 HTTP 服务器拦截 Claude 的 API 请求，完成模型名映射 + effort 映射后**流式透传**到第三方后端
 5. **启动 Claude 桌面版** — 所有组件就绪后自动拉起 Claude
 6. **优雅退出** — Ctrl+C 后逆序停止所有进程（含 WSL VM）
 
@@ -27,7 +27,8 @@ local_proxy.py  (运行在 127.0.0.1:8899)
   ├─ 模型名称映射 (haiku/sonnet/opus → 目标模型)
   ├─ effort 映射 (按模型等级覆写 reasoning effort)
   ├─ GET / 健康检查，GET /reload 热加载配置
-  └─ 转发到目标 API (DeepSeek Anthropic 兼容端点 / OpenAI)
+  ├─ 流式透传响应到目标 API (DeepSeek Anthropic 兼容端点 / OpenAI)
+  └─ 启动期端口独占 + 请求体上限/干净拒绝（单实例 & 抗 ECONNRESET）
 
 common.py  (共享工具模块)
   ├─ 统一日志配置（双输出 + 按日轮转 + 自动清理）
@@ -217,10 +218,37 @@ python launch.py
 
 - **GET /** — 健康检查，返回 `{"status": "ok"}`
 - **GET /reload** — 热加载 `model_config.yaml`，返回 `{"reload": "ok"}` 或 `{"reload": "failed"}`
-- **POST /*** — 接收 Claude 的 API 请求，按 `model_mapping` 替换模型名，按 `effort_mapping` 覆写 reasoning effort，转发到 `api_base_url`
+- **POST /*** — 接收 Claude 的 API 请求，按 `model_mapping` 替换模型名，按 `effort_mapping` 覆写 reasoning effort，**流式透传**到 `api_base_url`（详见下方「请求转发的关键设计」）
 - Debug 模式（`debug_mode: true`）将完整请求/响应写入日志文件 `logs/proxy_YYYYMMDD.log`
 - 独立运行时按 `r` 热加载配置，按 `q` 退出
 - 被 `launch.py` 以子进程方式启动时，键盘监听自动禁用，改由 `launch.py` 通过 `GET /reload` 远程触发热加载
+
+### 请求转发的关键设计（流式 / 大请求体 / 端口独占）
+
+代理在转发链路上有三处刻意为之的设计，用于根除"客户端莫名 `ECONNRESET` / 会话卡死"一类问题：
+
+**1. 真·流式透传（stream passthrough）**
+
+代理对上游请求使用 `stream=True`，**响应头一到就边收边 `flush`** 把字节推给客户端，并**原样透传上游的 `Content-Type`**（SSE 为 `text/event-stream`，不再硬编码 `application/json`）。
+
+- 为什么重要：若整段缓冲后再一次性返回，长回答（大上下文 + 高 effort 推理可达数十秒）期间客户端**一个字节都收不到**，会触发其自身读超时而主动重置连接，表现为 `ECONNRESET`、会话"卡死"。流式透传后**首字节通常 < 0.5s 到达、SSE 事件全程分散流淌**，连接永不在静默中超时。
+- 上游读超时设为 `(连接 10s, 读 300s)`，其中读超时是"相邻两个数据块之间"的最大间隔，对长生成足够宽松。
+
+**2. 大请求体适配 + 干净拒绝（抗 RST）**
+
+请求体上限为 **32 MiB**（`common.py: MAX_REQUEST_BODY_BYTES`，对齐 Anthropic 32MB 上限，可容纳内联 PDF 等 base64 附件）。超限或畸形请求一律**干净拒绝**而非重置连接：
+
+- 体积 > 上限 → **先排空客户端仍在上传的请求体**，再返回 `413`。若不排空就直接关连接，未读的请求体会触发 TCP RST，客户端看到的将是 `ECONNRESET` 而非 `413`。
+- `Content-Length` 缺失/非法/为负 → 干净 `400`（避免解析异常冲垮处理线程而导致连接被重置）。
+- 上述拒绝均写入日志（含真实体积），不再静默。
+
+> 注意：DeepSeek 等后端通常**不支持** Anthropic 的 `document`/PDF 内联块。需要让模型读 PDF 时，应由客户端工具/技能把 PDF **抽成文本**再发送，而非直接内联超大 base64 附件。
+
+**3. 启动期端口独占（单实例保证）**
+
+`local_proxy.py` 绑定端口前会执行 `ensure_sole_instance`：若 `8899` 已被占用，**仅当占用者是「python 进程且命令行含 `local_proxy.py`」时**才终止它（迁移到别的环境时绝不误杀无关进程；外来进程仅告警并中止启动），清理后**复查端口确实释放**才继续。
+
+- 为什么重要：Windows 的 `SO_REUSEADDR` 允许两个进程**共占同一端口**。若旧代理进程残留，新进程会与其同时监听 `8899`、请求被随机分流，导致"改了代码重启却仍跑旧逻辑"的诡异现象。此机制确保任何时刻 `8899` 上只有一个、且是最新代码的实例。
 
 ### common.py — 共享工具模块
 
@@ -230,7 +258,7 @@ python launch.py
 - **端口工具** — `is_port_listening()` 和 `wait_for_port()`，用于探测和等待端口就绪
 - **进程管理** — `start_process()` 启动子进程（支持隐藏窗口），`terminate_process()` 优雅终止（terminate → wait → kill）
 - **配置验证** — `validate_config_schema()` 检查必需字段是否存在
-- **常量** — 模型 tier 关键字（`opus` / `sonnet` / `haiku`）、网络超时、WSL 重试参数等
+- **常量** — 模型 tier 关键字（`opus` / `sonnet` / `haiku`）、请求体上限（`MAX_REQUEST_BODY_BYTES`，32 MiB）、网络超时、WSL 重试参数等
 
 ### 日志
 
