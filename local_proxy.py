@@ -15,6 +15,8 @@ from threading import Thread
 import sys
 import traceback
 import os
+import time
+import subprocess
 
 from common import (
     setup_logging,
@@ -22,6 +24,7 @@ from common import (
     DEFAULT_TIER,
     MAX_REQUEST_BODY_BYTES,
     validate_config_schema,
+    is_port_listening,
 )
 
 # ========== 全局变量 ==========
@@ -131,9 +134,49 @@ class SmartProxy(BaseHTTPRequestHandler):
                     logger.debug(f"[>>] effort 转换: {old_effort} -> {target_effort}")
 
     def _forward_request(self, data, target_url, headers):
-        """转发请求到上游 API"""
+        """转发请求到上游 API（流式：响应头一到就返回，body 由调用方边收边转发）"""
         new_body = json.dumps(data).encode('utf-8')
-        return requests.post(target_url, data=new_body, headers=headers, timeout=120)
+        # stream=True：headers 到达即返回，不等整段 body 生成完
+        # timeout=(连接超时, 读超时)；读超时是"相邻两个数据块之间"的最大间隔，流式下足够宽松
+        return requests.post(
+            target_url, data=new_body, headers=headers,
+            stream=True, timeout=(10, 300),
+        )
+
+    def _stream_response_to_client(self, response, debug):
+        """流式把上游响应写回客户端；客户端或上游中途断开则安静收尾。
+
+        关键：每收到一块就 flush——客户端一连上就持续收到字节，
+        永不会在长达数十秒的静默里触发自身超时而 reset（根治 ECONNRESET）。
+        """
+        preview = bytearray() if debug else None
+        try:
+            # requests 异常(ChunkedEncodingError/ConnectionError/ReadTimeout)均是 OSError 子类，
+            # 与 wfile 写入的 BrokenPipe/ConnectionAbort 一并被 OSError 接住
+            for chunk in response.iter_content(chunk_size=8192):
+                self.wfile.write(chunk)
+                self.wfile.flush()
+                if preview is not None and len(preview) < (1 << 20):
+                    preview.extend(chunk)  # debug 时仅留存前 1 MiB 供日志，避免日志爆炸
+        except OSError as e:
+            # 客户端断开（ECONNRESET/Abort）或上游中断：停止透传，不再回写
+            logger.debug(f"流式透传中断（客户端或上游断开）: {e}")
+        finally:
+            response.close()
+        if preview is not None:
+            logger.debug(f"[<<] 响应体(前1MiB):\n{preview.decode('utf-8', errors='replace')}")
+
+    def _drain_request_body(self, content_length):
+        """排空并丢弃客户端剩余请求体，避免未读体导致 TCP RST（客户端表现为 ECONNRESET）。"""
+        remaining = content_length
+        try:
+            while remaining > 0:
+                chunk = self.rfile.read(min(remaining, 1 << 20))  # 每次最多 1 MiB
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+        except Exception as e:
+            logger.debug(f"排空请求体时出错（客户端可能已断开）: {e}")
 
     def do_POST(self):
         """核心转发逻辑"""
@@ -142,9 +185,27 @@ class SmartProxy(BaseHTTPRequestHandler):
             _debug = DEBUG_MODE
             _config = dict(current_config)  # shallow copy for this request
 
-        # 请求体大小限制
-        content_length = int(self.headers.get('Content-Length', 0))
+        # 请求体大小限制：先安全解析 Content-Length，畸形/负值回干净 400，
+        # 避免 int() 抛 ValueError 冲出处理线程导致连接被重置（又一种 ECONNRESET）
+        try:
+            content_length = int(self.headers.get('Content-Length') or 0)
+            if content_length < 0:
+                raise ValueError('negative Content-Length')
+        except (TypeError, ValueError):
+            self.send_response(400)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": "Invalid Content-Length"}).encode())
+            return
         if content_length > MAX_REQUEST_BODY_BYTES:
+            # 先排空客户端仍在上传的请求体，否则"响应先于请求体读完"会触发 TCP RST，
+            # 客户端收到的将是 ECONNRESET 而非 413。同时记录真实体积，不再静默。
+            self._drain_request_body(content_length)
+            logger.warning(
+                f"[>>] 请求体过大被拒 413: {content_length} 字节 "
+                f"({content_length / 1024 / 1024:.2f} MiB) > 上限 "
+                f"{MAX_REQUEST_BODY_BYTES / 1024 / 1024:.0f} MiB"
+            )
             self.send_response(413)  # Payload Too Large
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
@@ -153,6 +214,7 @@ class SmartProxy(BaseHTTPRequestHandler):
 
         post_data = self.rfile.read(content_length) if content_length > 0 else b'{}'
 
+        response_started = False  # 是否已向客户端下发响应头（决定出错时能否回 500）
         try:
             data = json.loads(post_data.decode('utf-8'))
             original_model = data.get("model", "")
@@ -174,39 +236,50 @@ class SmartProxy(BaseHTTPRequestHandler):
             if _debug:
                 logger.debug(f"[>>] 收到请求: {self.path}")
                 logger.debug(f"[>>] 模型转换: {original_model} -> {target_model}")
-                logger.debug(f"[>>] 请求体:\n{json.dumps(data, indent=2, ensure_ascii=False)}")
+                if len(post_data) > (1 << 20):
+                    logger.debug(f"[>>] 请求体: <{len(post_data)} 字节，过大已省略>")
+                else:
+                    logger.debug(f"[>>] 请求体:\n{json.dumps(data, indent=2, ensure_ascii=False)}")
 
             headers = {
                 'Content-Type': 'application/json',
-                'Authorization': f'Bearer {_config.get("api_key")}'
+                'Authorization': f'Bearer {_config.get("api_key")}',
+                # 禁用上游压缩：避免运行环境缺 brotli 时流中途解码失败截断 SSE，也省去解码缓冲
+                'Accept-Encoding': 'identity',
             }
 
-            # 转发请求
+            # 转发请求（流式）
             response = self._forward_request(data, target_url, headers)
 
             # ===== Debug 日志 =====
             if _debug:
                 logger.debug(f"[<<] 上游响应 ({response.status_code})")
                 logger.debug(f"[<<] 转发至: {target_url}")
-                logger.debug(f"[<<] 响应体:\n{response.text}")
 
-            # 返回给客户端
+            # 流式透传给客户端：先下发响应头（透传上游真实 Content-Type，
+            # SSE 为 text/event-stream，不再硬编码 application/json），再 body 边收边 flush
             self.send_response(response.status_code)
-            self.send_header('Content-Type', 'application/json')
+            response_started = True  # 头已下发：此后任何异常都不能再回写 500，否则污染流
+            self.send_header('Content-Type',
+                             response.headers.get('Content-Type', 'application/json'))
             self.end_headers()
-            self.wfile.write(response.content)
+            self._stream_response_to_client(response, _debug)
 
         except Exception as e:
             tb = traceback.format_exc()
             # error 级别：同时写入文件和控制台
             logger.error(f"[POST] 处理失败:\n{tb}")
-            try:
-                self.send_response(500)
-                self.send_header('Content-Type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps({"error": str(e)}).encode())
-            except Exception as send_err:
-                logger.debug(f"发送错误响应失败（客户端可能已断开）: {send_err}")
+            if response_started:
+                # 响应头/流已开始，再发 500 会向已开始的 SSE 注入脏状态行，只记录不回写
+                logger.debug("响应已开始，跳过 500 回写")
+            else:
+                try:
+                    self.send_response(500)
+                    self.send_header('Content-Type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"error": str(e)}).encode())
+                except Exception as send_err:
+                    logger.debug(f"发送错误响应失败（客户端可能已断开）: {send_err}")
 
 
 def keyboard_listener(server):
@@ -235,12 +308,55 @@ def keyboard_listener(server):
             sys.exit(0)
 
 
+def ensure_sole_instance(host, port):
+    """启动前独占端口：杀掉确为本代理旧实例的占用者；清理后端口仍被占则中止启动。
+
+    安全校验：只杀「python 进程且命令行含 local_proxy.py」者——迁移到别的环境时
+    绝不误伤无关进程。清理后复查端口，仍被占（杀失败/外来进程/释放慢）即 sys.exit，
+    拒绝与残留进程共享端口（杜绝双实例跑旧代码）。此刻本进程尚未绑定，不会误杀自己。
+    """
+    if not is_port_listening(port, host):
+        return
+    marker = os.path.basename(__file__)
+    # 逐个占用 PID 校验：python 进程 + 命令行含本脚本名才 Stop-Process，否则标记 FOREIGN 不动手
+    ps = (
+        f"foreach ($procId in (Get-NetTCPConnection -LocalPort {port} -State Listen "
+        f"-ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique)) {{ "
+        f"$p = Get-CimInstance Win32_Process -Filter \"ProcessId=$procId\" -ErrorAction SilentlyContinue; "
+        f"if ($p.Name -like 'python*' -and $p.CommandLine -like '*{marker}*') "
+        f"{{ Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue; \"KILLED $procId\" }} "
+        f"else {{ \"FOREIGN $procId $($p.Name)\" }} }}"
+    )
+    try:
+        out = subprocess.run(
+            ['powershell', '-NoProfile', '-Command', ps],
+            capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW,
+        ).stdout
+    except OSError as e:
+        logger.error(f"无法调用 powershell 清理旧实例: {e}")
+        out = ""
+    killed = [ln.split()[1] for ln in out.splitlines() if ln.startswith('KILLED')]
+    foreign = [ln[len('FOREIGN '):].strip() for ln in out.splitlines() if ln.startswith('FOREIGN')]
+    if killed:
+        logger.warning(f"已请求终止占用端口 {port} 的旧代理 PID: {', '.join(killed)}")
+    if foreign:
+        logger.error(f"端口 {port} 被非本代理进程占用: {'; '.join(foreign)}")
+    # 复查：清理后端口必须真正释放，否则拒绝以共享端口方式启动（不信 KILLED 字样，只信端口状态）
+    for _ in range(20):  # 最多等 ~2s 让端口释放
+        if not is_port_listening(port, host):
+            return
+        time.sleep(0.1)
+    logger.critical(f"端口 {port} 清理后仍被占用，拒绝共享端口启动，请手动处理后重试")
+    sys.exit(1)
+
+
 if __name__ == '__main__':
     if not load_config():
         logger.critical("初始配置加载失败，程序退出")
         sys.exit(1)
 
     server_address = ('127.0.0.1', 8899)
+    ensure_sole_instance(*server_address)  # 抢占式清理旧实例，杜绝僵尸代理
     httpd = ThreadedHTTPServer(server_address, SmartProxy)
 
     listener_thread = Thread(target=keyboard_listener, args=(httpd,), daemon=True)

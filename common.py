@@ -34,7 +34,7 @@ DEFAULT_PORT_WAIT_TIMEOUT = PORT_WAIT_TIMEOUT  # 默认端口等待超时（秒�
 PROCESS_TERMINATE_TIMEOUT = 5     # terminate 后等待超时（秒）
 
 # 代理
-MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024  # do_POST 最大请求体 10 MiB
+MAX_REQUEST_BODY_BYTES = 32 * 1024 * 1024  # do_POST 最大请求体 32 MiB（容纳内联 PDF base64，对齐 Anthropic 32MB 上限）
 
 # WSL
 WSL_VERIFY_ATTEMPTS = 5
