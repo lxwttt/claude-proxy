@@ -32,6 +32,7 @@ current_config = {}
 script_dir = os.path.dirname(os.path.abspath(__file__))
 config_file_path = os.path.join(script_dir, "config", "model_config.yaml")
 DEBUG_MODE = False
+FULL_BODY_LOG = False  # debug 下是否记录完整响应体（关=仅记首少量字节，避免 SSE 日志爆炸）
 _config_lock = threading.Lock()
 
 # ========== 日志系统（文件 + 控制台） ==========
@@ -46,7 +47,7 @@ logger = setup_logging(
 
 def load_config():
     """从 YAML 文件加载配置，并提取 debug_mode"""
-    global current_config, DEBUG_MODE
+    global current_config, DEBUG_MODE, FULL_BODY_LOG
     try:
         with open(config_file_path, 'r', encoding='utf-8') as f:
             all_configs = yaml.safe_load(f)
@@ -70,10 +71,12 @@ def load_config():
         with _config_lock:
             current_config = env_config
             DEBUG_MODE = current_config.get("debug_mode", False)
+            FULL_BODY_LOG = current_config.get("full_body_log", False)
             base_url = current_config.get('api_base_url', '')
 
         logger.info(f"配置 '{current_env_name}' 加载成功 (BaseURL: {base_url})")
-        logger.info(f"Debug模式: {'ON' if DEBUG_MODE else 'OFF'}")
+        logger.info(f"Debug模式: {'ON' if DEBUG_MODE else 'OFF'}"
+                    f"{'（全量响应体）' if (DEBUG_MODE and FULL_BODY_LOG) else ''}")
         return True
     except Exception as e:
         logger.error(f"读取配置文件错误: {e}")
@@ -82,7 +85,9 @@ def load_config():
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     """每请求独立线程，支持多会话并发"""
-    allow_reuse_address = True
+    # 显式禁用端口复用：旧实例残留时新进程 bind 会显式报错，而非在 Windows 上静默共占端口
+    # （配合 ensure_sole_instance：杀旧→复查→绑定，绑不上即 fail-loud）
+    allow_reuse_address = False
     daemon_threads = True  # 主进程退出时线程自动终止
 
 
@@ -143,12 +148,14 @@ class SmartProxy(BaseHTTPRequestHandler):
             stream=True, timeout=(10, 300),
         )
 
-    def _stream_response_to_client(self, response, debug):
+    def _stream_response_to_client(self, response, debug, full):
         """流式把上游响应写回客户端；客户端或上游中途断开则安静收尾。
 
         关键：每收到一块就 flush——客户端一连上就持续收到字节，
         永不会在长达数十秒的静默里触发自身超时而 reset（根治 ECONNRESET）。
+        debug 日志仅留存响应体前 cap 字节：full=True 留 1 MiB，否则只留 4 KiB，避免 SSE 刷爆日志。
         """
+        cap = (1 << 20) if full else 4096
         preview = bytearray() if debug else None
         try:
             # requests 异常(ChunkedEncodingError/ConnectionError/ReadTimeout)均是 OSError 子类，
@@ -156,15 +163,15 @@ class SmartProxy(BaseHTTPRequestHandler):
             for chunk in response.iter_content(chunk_size=8192):
                 self.wfile.write(chunk)
                 self.wfile.flush()
-                if preview is not None and len(preview) < (1 << 20):
-                    preview.extend(chunk)  # debug 时仅留存前 1 MiB 供日志，避免日志爆炸
+                if preview is not None and len(preview) < cap:
+                    preview.extend(chunk)
         except OSError as e:
             # 客户端断开（ECONNRESET/Abort）或上游中断：停止透传，不再回写
             logger.debug(f"流式透传中断（客户端或上游断开）: {e}")
         finally:
             response.close()
         if preview is not None:
-            logger.debug(f"[<<] 响应体(前1MiB):\n{preview.decode('utf-8', errors='replace')}")
+            logger.debug(f"[<<] 响应体(前{cap // 1024}KiB):\n{preview.decode('utf-8', errors='replace')}")
 
     def _drain_request_body(self, content_length):
         """排空并丢弃客户端剩余请求体，避免未读体导致 TCP RST（客户端表现为 ECONNRESET）。"""
@@ -183,6 +190,7 @@ class SmartProxy(BaseHTTPRequestHandler):
         # 线程安全读取配置
         with _config_lock:
             _debug = DEBUG_MODE
+            _full_log = FULL_BODY_LOG
             _config = dict(current_config)  # shallow copy for this request
 
         # 请求体大小限制：先安全解析 Content-Length，畸形/负值回干净 400，
@@ -263,7 +271,7 @@ class SmartProxy(BaseHTTPRequestHandler):
             self.send_header('Content-Type',
                              response.headers.get('Content-Type', 'application/json'))
             self.end_headers()
-            self._stream_response_to_client(response, _debug)
+            self._stream_response_to_client(response, _debug, _full_log)
 
         except Exception as e:
             tb = traceback.format_exc()
@@ -357,7 +365,12 @@ if __name__ == '__main__':
 
     server_address = ('127.0.0.1', 8899)
     ensure_sole_instance(*server_address)  # 抢占式清理旧实例，杜绝僵尸代理
-    httpd = ThreadedHTTPServer(server_address, SmartProxy)
+    try:
+        httpd = ThreadedHTTPServer(server_address, SmartProxy)
+    except OSError as e:
+        # allow_reuse_address=False 下，端口仍被占会在此显式失败（而非静默共占）
+        logger.critical(f"绑定 {server_address[0]}:{server_address[1]} 失败（端口可能仍被占用）: {e}")
+        sys.exit(1)
 
     listener_thread = Thread(target=keyboard_listener, args=(httpd,), daemon=True)
     listener_thread.start()

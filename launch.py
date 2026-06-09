@@ -25,9 +25,8 @@ from common import (
     validate_config_schema,
     TIERS,
     DEFAULT_TIER,
-    WSL_VERIFY_ATTEMPTS,
-    WSL_VERIFY_INTERVAL,
 )
+import keep_wsl
 
 # ========== 常量 ==========
 PORT_WAIT_TIMEOUT = 30
@@ -135,144 +134,6 @@ class ClaudeLauncher:
             return False
 
     # ------------------------------------------------------------------
-    # WSL 管理 - 子方法
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _run_wsl(args, timeout, **kwargs):
-        """统一执行 wsl 子命令。
-
-        关键：始终带 CREATE_NO_WINDOW，让 wsl.exe 拥有独立控制台。
-        否则 wsl.exe 共享父进程控制台，会在 VM 初始化的不稳定期向整个
-        控制台进程组广播 CTRL_C/CTRL_BREAK，被 launch.py 当成伪 KeyboardInterrupt
-        （历史问题：启动期莫名"收到中断信号"直接退出）。
-        """
-        creationflags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
-        return subprocess.run(['wsl', *args], creationflags=creationflags, timeout=timeout, **kwargs)
-
-    def _run_wsl_safe(self, args, timeout, **kwargs):
-        """运行 wsl 子命令，异常时记录 warning 并返回 None（统一错误处理，避免各调用方重复 try/except）。"""
-        try:
-            return self._run_wsl(args, timeout=timeout, **kwargs)
-        except Exception as e:
-            logger.warning(f"wsl {' '.join(args)} 执行失败: {e}")
-            return None
-
-    def _check_wsl_available(self) -> bool:
-        """检查 wsl.exe 是否存在且可用。"""
-        try:
-            probe = self._run_wsl(
-                ['--version'],
-                capture_output=True, encoding='utf-8', errors='replace', timeout=10
-            )
-            if probe.returncode != 0:
-                logger.warning("WSL 未安装或不可用，VM 功能将无法启动")
-                return False
-        except FileNotFoundError:
-            logger.info("未找到 WSL，跳过")
-            return False
-        except Exception:
-            logger.warning("WSL 探测失败，VM 功能将无法启动")
-            return False
-        return True
-
-    def _ensure_wsl2_default(self) -> bool:
-        """确保 WSL2 为默认版本。直接幂等设置，避免解析 wsl --status 的本地化/UTF-16 输出。"""
-        result = self._run_wsl_safe(['--set-default-version', '2'], timeout=30,
-                                    capture_output=True, encoding='utf-8', errors='replace')
-        if result is None:
-            return False
-        if result.returncode != 0:
-            logger.error("无法设置 WSL2 为默认版本，VM 不可用")
-            return False
-        return True
-
-    def _ensure_wsl_distro_exists(self) -> bool:
-        """检查 WSL 发行版是否已安装。"""
-        result = self._run_wsl_safe(['-l', '-v'], timeout=10, capture_output=True, encoding='utf-8', errors='replace')
-        if result is None:
-            return False
-        if result.returncode == 0 and len(result.stdout.strip().split('\n')) <= 1:
-            logger.error("未安装 WSL 发行版，VM 功能不可用。请手动运行: wsl --install -d Ubuntu")
-            return False
-        return True
-
-    def _start_wsl_keeper(self) -> bool:
-        """用 VBScript 启动 WSL 后台进程（唯一能彻底隐藏控制台窗口的方式）。"""
-        # WSL.exe 是控制台子系统程序，会自建 ConPTY 窗口，Popen 的 creationflags 无法抑制
-        # VBScript Run(..., 0, False) → 隐藏窗口 (0) + 不等待 (False)
-        logger.info("保持 WSL VM 后台运行...")
-        try:
-            import tempfile
-            vbs_content = 'CreateObject("WScript.Shell").Run "wsl -e sleep infinity", 0, False'
-            vbs_path = os.path.join(tempfile.gettempdir(), '_claude_wsl_keeper.vbs')
-            with open(vbs_path, 'w') as f:
-                f.write(vbs_content)
-            subprocess.run(
-                ['cscript.exe', '//NoLogo', '//B', vbs_path],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-                timeout=10,
-            )
-            logger.info("WSL keep-alive 已通过 VBS 后台启动")
-            return True
-        except Exception as e:
-            logger.warning(f"WSL keep-alive 启动失败: {e}")
-            return False
-
-    def _verify_wsl_running(self) -> bool:
-        """验证 WSL 确实运行中（VBS 启动后需要等 WSL 初始化完成）。
-        除 KeyboardInterrupt 外不抛异常——其余错误降级为 warning 并返回 False（让真正的中断能传播到上层清理）。"""
-        for attempt in range(WSL_VERIFY_ATTEMPTS):
-            try:
-                verify = self._run_wsl(['-l', '--running'], capture_output=True, timeout=10)
-            except Exception as e:
-                logger.warning(f"WSL 状态查询失败（{attempt + 1}/{WSL_VERIFY_ATTEMPTS}）: {e}")
-                time.sleep(WSL_VERIFY_INTERVAL)
-                continue
-            if verify.returncode == 0:
-                logger.info("WSL 2 VM 运行确认成功")
-                return True
-            logger.warning(f"WSL 尚无运行中的发行版（{attempt + 1}/{WSL_VERIFY_ATTEMPTS}），重试...")
-            time.sleep(WSL_VERIFY_INTERVAL)
-
-        logger.warning(f"WSL 运行验证超时（{WSL_VERIFY_ATTEMPTS}次尝试均失败），但 WSL 可能仍在初始化中")
-        return False
-
-    # ------------------------------------------------------------------
-    # WSL 管理 - 编排
-    # ------------------------------------------------------------------
-
-    def ensure_wsl_running(self) -> bool:
-        """确保 WSL2 VM 后台持续运行（Claude VM 沙盒的必要前提），仅 Windows 生效"""
-        if os.name != 'nt':
-            return True
-
-        if not self._check_wsl_available():
-            return False
-
-        if not self._ensure_wsl2_default():
-            return False
-
-        if not self._ensure_wsl_distro_exists():
-            return False
-
-        if not self._start_wsl_keeper():
-            return False
-
-        # 前 4 步是硬性要求（失败已 return False）；此步仅最终确认：
-        # WSL 异步初始化可能较慢，keeper 已启动，确认不到只告警不中止，避免误杀慢启动
-        self._verify_wsl_running()
-        return True
-
-    def stop_wsl_keeper(self):
-        """停止 WSL 后台 VM（VBS 启动的 sleep infinity 不是 Python 子进程，直接用 shutdown）"""
-        logger.info("停止 WSL VM...")
-        if self._run_wsl_safe(['--shutdown'], timeout=15, capture_output=True) is not None:
-            logger.info("WSL VM 已停止")
-
-    # ------------------------------------------------------------------
     # 代理管理
     # ------------------------------------------------------------------
 
@@ -360,7 +221,7 @@ class ClaudeLauncher:
     def _cleanup(self):
         """清理所有资源：停止代理、WSL、额外EXE"""
         self.stop_proxy()
-        self.stop_wsl_keeper()
+        keep_wsl.stop_wsl_keeper()
         self.extra_exe_manager.stop_all()
 
     def run(self):
@@ -372,8 +233,8 @@ class ClaudeLauncher:
         # 都清理已启动组件后退出，绝不留下孤儿进程、绝不静默崩溃
         try:
             # 0. 确保 WSL 已就绪——Windows 上 Claude VM 沙盒必需，失败即中止
-            #    （ensure_wsl_running 在非 Windows 直接返回 True，不影响其他平台）
-            if not self.ensure_wsl_running():
+            #    （keep_wsl.ensure_wsl_running 在非 Windows 直接返回 True，不影响其他平台）
+            if not keep_wsl.ensure_wsl_running():
                 logger.error("WSL 未就绪——Windows 上 Claude VM 沙盒依赖 WSL，无法继续")
                 self._cleanup()
                 return False

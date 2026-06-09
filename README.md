@@ -45,7 +45,8 @@ common.py  (共享工具模块)
 | 文件 | 用途 |
 |---|---|
 | `launch.py` | 主启动器 — 编排 WSL、VPN、代理、Claude 的启动顺序 |
-| `local_proxy.py` | API 转发代理 — HTTP 服务器，模型名映射 + effort 映射 + 请求转发 |
+| `keep_wsl.py` | WSL2 VM 保活模块 — 已从 launch.py 解耦；由 launch.py 调用，也可 `python keep_wsl.py` 单独运行 |
+| `local_proxy.py` | API 转发代理 — HTTP 服务器，模型名映射 + effort 映射 + 流式转发 |
 | `common.py` | 共享工具模块 — 日志、端口检查、进程管理、常量 |
 | `config/config.yaml` | 启动器配置 — Python 路径、端口、额外 EXE（从 `config/sample_config.yaml` 复制） |
 | `config/model_config.yaml` | API 转发配置 — 后端选择、API Key、模型映射、effort 映射（从 `config/sample_model_config.yaml` 复制） |
@@ -110,6 +111,7 @@ settings:
   DeepSeek:
     name: "DeepSeek"
     debug_mode: true            # 开启后打印详细请求/响应日志
+    full_body_log: false        # 仅深度排查设 true：记完整响应体；平时只记首 4KiB（防 SSE 刷爆日志）
     api_base_url: "https://api.deepseek.com/anthropic"   # 目标 API 地址
     api_key: "sk-..."                                     # API Key
     model_mapping:
@@ -149,6 +151,21 @@ effort_mapping:
 
 - `local_proxy.py` 独立运行时，在终端按 `r` 键即可热加载 `model_config.yaml`，无需重启；按 `q` 键退出程序。
 - 通过 `launch.py` 运行时，在启动器终端按 `r` 键，或通过 HTTP 请求 `GET /reload` 触发配置重载。
+
+`debug_mode` 与 `full_body_log` 的关系：`debug_mode: true` 记录请求/响应概要；`full_body_log` 默认 `false`，此时响应体只记前 4 KiB（足够看到流是否正常），仅在需要逐字节排查时临时设为 `true` 记录完整 SSE，避免日志被长回答刷爆。
+
+### 3. 在 Claude Desktop 启用第三方推理（关键前提）
+
+> **这是让 Claude 走本代理的真正开关 —— 本项目其余组件都只是为它铺路。**
+
+`launch.py` 负责拉起代理、WSL、VPN 等，但**不负责把 Claude 指向代理**；该重定向在 Claude Desktop 自身设置里完成：
+
+1. 打开 Claude Desktop → **Settings / 设置**
+2. 进入 **Developer**（开发者）
+3. 选择 **Configure third-party inference**（配置第三方推理）
+4. 将推理端点指向本地代理 **`http://127.0.0.1:8899`**
+
+配置完成后，Claude 的 API 请求会发到 `127.0.0.1:8899`，由 `local_proxy.py` 完成模型映射并流式转发到后端。若此项未配置，Claude 仍直连官方端点，代理不会收到任何请求。
 
 ## 使用方法
 
@@ -204,7 +221,7 @@ python launch.py
 
 `ClaudeLauncher` 类按序执行以下步骤：
 
-1. **确保 WSL2 运行** — 检测 WSL 可用性，设置 WSL2 为默认版本，如未安装 WSL 发行版，请手动运行 `wsl --install -d Ubuntu`，通过 VBScript 后台保活 WSL VM（Claude 沙盒功能依赖此 VM）
+1. **确保 WSL2 运行** — 调用 `keep_wsl` 模块：检测 WSL 可用性，设置 WSL2 为默认版本，如未安装 WSL 发行版，请手动运行 `wsl --install -d Ubuntu`，通过 VBScript 后台保活 WSL VM（Claude 沙盒功能依赖此 VM）
 2. **加载配置** — 读取 `config/config.yaml`
 3. **设置代理环境变量** — 将 `HTTP_PROXY` / `HTTPS_PROXY` 注入当前进程环境
 4. **启动额外 EXE** — `ExtraExeManager` 逐一启动 EXE，等待端口就绪
@@ -248,7 +265,7 @@ python launch.py
 
 `local_proxy.py` 绑定端口前会执行 `ensure_sole_instance`：若 `8899` 已被占用，**仅当占用者是「python 进程且命令行含 `local_proxy.py`」时**才终止它（迁移到别的环境时绝不误杀无关进程；外来进程仅告警并中止启动），清理后**复查端口确实释放**才继续。
 
-- 为什么重要：Windows 的 `SO_REUSEADDR` 允许两个进程**共占同一端口**。若旧代理进程残留，新进程会与其同时监听 `8899`、请求被随机分流，导致"改了代码重启却仍跑旧逻辑"的诡异现象。此机制确保任何时刻 `8899` 上只有一个、且是最新代码的实例。
+- 为什么重要：Windows 的 `SO_REUSEADDR` 会**允许两个进程共占同一端口**——旧代理残留时，新进程本会与其同时监听 `8899`、请求被随机分流，导致"改了代码重启却仍跑旧逻辑"的诡异现象。本项目已**显式 `allow_reuse_address = False`**（绑定被占端口会直接报错、fail-loud），再叠加 `ensure_sole_instance` 主动清理旧实例并复查端口，双重保证任何时刻 `8899` 上只有一个、且是最新代码的实例。
 
 ### common.py — 共享工具模块
 
@@ -273,7 +290,7 @@ python launch.py
 
 ### WSL2 VM 保活机制
 
-`launch.py` 需要 WSL2 保持后台运行（Claude 沙盒 VM 的前提）。`wsl -e sleep infinity` 可以维持 VM 存活，但 `wsl.exe` 是控制台子系统程序，即使使用 `CREATE_NO_WINDOW` 也无法隐藏其窗口。解决方案：通过 VBScript 的 `WScript.Shell.Run(hidden)` 启动 WSL，再调用 `cscript.exe` 执行该 VBS。
+WSL2 保活逻辑独立在 **`keep_wsl.py`** 模块中（与"换 API 后端"正交，故从 launch.py 解耦；launch.py 启动时 `import keep_wsl` 调用，也可 `python keep_wsl.py` 单独运行只保活 WSL）。`wsl -e sleep infinity` 可以维持 VM 存活，但 `wsl.exe` 是控制台子系统程序，即使使用 `CREATE_NO_WINDOW` 也无法隐藏其窗口。解决方案：通过 VBScript 的 `WScript.Shell.Run(hidden)` 启动 WSL，再调用 `cscript.exe` 执行该 VBS。
 
 ### 指定 Claude 启动方式
 

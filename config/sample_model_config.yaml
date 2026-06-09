@@ -6,6 +6,7 @@ settings:
   DeepSeek:
     name: "DeepSeek"
     debug_mode: true                                # 是否打印详细请求/响应日志
+    full_body_log: false                            # 仅深度排查设 true：记完整响应体；平时只记首 4KiB
     api_base_url: "https://api.deepseek.com/anthropic"
     api_key: "sk-your-deepseek-api-key-here"        # 替换为实际 API Key
     model_mapping:

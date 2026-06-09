@@ -8,5 +8,6 @@ __pycache__/
 .codegraph/
 .vscode/
 .claude/
+.review-plan/
 
 CLAUDE.MD
