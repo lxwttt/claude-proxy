@@ -154,6 +154,8 @@ effort_mapping:
 
 `debug_mode` 与 `full_body_log` 的关系：`debug_mode: true` 记录请求/响应概要；`full_body_log` 默认 `false`，此时响应体只记前 4 KiB（足够看到流是否正常），仅在需要逐字节排查时临时设为 `true` 记录完整 SSE，避免日志被长回答刷爆。
 
+> ⚠️ 安全提示：`debug_mode: true` 会把**完整请求体（含全部对话内容，可能含你粘贴的凭据/隐私）以明文**写入 `logs/proxy_*.log` 并保留 7 天。模板默认开启仅为方便排障——日常使用建议设为 `false`，且 `logs/` 不应随仓库或备份外泄（已 `.gitignore`）。
+
 ### 3. 在 Claude Desktop 启用第三方推理（关键前提）
 
 > **这是让 Claude 走本代理的真正开关 —— 本项目其余组件都只是为它铺路。**

@@ -217,6 +217,15 @@ class SmartProxy(BaseHTTPRequestHandler):
             _full_log = FULL_BODY_LOG
             _config = dict(current_config)  # shallow copy for this request
 
+        # 不支持 chunked 请求体：BaseHTTPRequestHandler 不解块，若当 0 字节读会静默丢正文，
+        # 显式回 400 而非静默转发空体
+        if 'chunked' in self.headers.get('Transfer-Encoding', '').lower():
+            self.send_response(400)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": "chunked request body not supported"}).encode())
+            return
+
         # 请求体大小限制：先安全解析 Content-Length，畸形/负值回干净 400，
         # 避免 int() 抛 ValueError 冲出处理线程导致连接被重置（又一种 ECONNRESET）
         try:

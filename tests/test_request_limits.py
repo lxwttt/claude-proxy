@@ -73,3 +73,8 @@ def test_drain_reads_full_when_under_cap():
     p.DRAIN_CAP = 64 * 1024 * 1024
     p._drain_request_body(500)
     assert p.rfile.tell() == 500  # 合法超限请求被读完 → 可得干净 413
+
+
+def test_chunked_request_rejected_400(server):
+    data = _raw_post(server, "Transfer-Encoding: chunked\r\nContent-Type: application/json")
+    assert b"400" in _status(data)  # 不支持 chunked，显式 400 而非静默丢正文
