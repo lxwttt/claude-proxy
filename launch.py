@@ -141,6 +141,10 @@ class ClaudeLauncher:
         try:
             python_path = self.config['paths']['python']
             proxy_script = self.config['paths']['proxy_script']
+            # 相对路径以本文件目录为基准 resolve，不依赖调用方 CWD（与 local_proxy 的 __file__ 锚定一致）
+            if not Path(proxy_script).is_absolute():
+                proxy_script = str((Path(__file__).parent / proxy_script).resolve())
+            proxy_port = self.config['ports']['proxy_port']
 
             if not Path(python_path).exists():
                 logger.error(f"Python 不存在: {python_path}")
@@ -154,8 +158,9 @@ class ClaudeLauncher:
             logger.info(f"   Python: {python_path}")
             logger.info(f"   脚本: {proxy_script}")
 
+            # 端口作为命令行参数传入：config.yaml ports.proxy_port 为单一事实来源
             self.proxy_process = start_process(
-                [python_path, proxy_script],
+                [python_path, proxy_script, str(proxy_port)],
                 cwd=str(Path(proxy_script).parent),
                 stdin=subprocess.DEVNULL,
             )
@@ -165,7 +170,6 @@ class ClaudeLauncher:
 
             logger.info(f"   代理进程 PID: {self.proxy_process.pid}")
 
-            proxy_port = self.config['ports']['proxy_port']
             if not wait_for_port(proxy_port, label='proxy'):
                 logger.error(f"代理在 {PORT_WAIT_TIMEOUT} 秒内未能启动")
                 self.stop_proxy()
@@ -252,6 +256,8 @@ class ClaudeLauncher:
             if self.config.get('proxy_settings', {}).get('enabled', False):
                 os.environ['HTTP_PROXY'] = self.config['proxy_settings']['http_proxy']
                 os.environ['HTTPS_PROXY'] = self.config['proxy_settings']['https_proxy']
+                # 本机回环流量旁路代理，避免 launcher 对 127.0.0.1 的调用被误路由经 VPN
+                os.environ['NO_PROXY'] = '127.0.0.1,localhost'
                 logger.info("设置代理环境变量")
 
             # 4. 启动额外EXE程序
@@ -298,7 +304,8 @@ class ClaudeLauncher:
                     if key == b'r':
                         logger.info("正在刷新代理配置...")
                         try:
-                            resp = requests.get(_reload_url, timeout=5)
+                            resp = requests.get(_reload_url, timeout=5,
+                                                proxies={'http': None, 'https': None})
                             if resp.status_code == 200:
                                 logger.info("[OK] 代理配置已刷新")
                             else:

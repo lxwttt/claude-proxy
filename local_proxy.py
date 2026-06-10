@@ -377,7 +377,12 @@ if __name__ == '__main__':
         logger.critical("初始配置加载失败，程序退出")
         sys.exit(1)
 
-    server_address = ('127.0.0.1', 8899)
+    # 端口单一事实来源：由 launch.py 以命令行参数传入（config.yaml ports.proxy_port）；独立运行默认 8899
+    try:
+        port = int(sys.argv[1]) if len(sys.argv) > 1 else 8899
+    except (ValueError, IndexError):
+        port = 8899
+    server_address = ('127.0.0.1', port)
     ensure_sole_instance(*server_address)  # 抢占式清理旧实例，杜绝僵尸代理
     try:
         httpd = ThreadedHTTPServer(server_address, SmartProxy)
@@ -389,7 +394,7 @@ if __name__ == '__main__':
     listener_thread = Thread(target=keyboard_listener, args=(httpd,), daemon=True)
     listener_thread.start()
 
-    logger.info(f"代理已启动，监听 http://127.0.0.1:8899")
+    logger.info(f"代理已启动，监听 http://127.0.0.1:{port}")
     logger.info(f"按键指令 -> 'r' 重载配置 | 'q' 退出")
 
     try:

@@ -36,7 +36,7 @@ if not exist "launch.py" (
 
 REM ===== 2. 从 config.yaml 提取 Python 路径 =====
 set PYTHON_CFG=
-for /f "tokens=2" %%i in ('findstr /b /c:"  python:" config\config.yaml') do set "PYTHON_CFG=%%i"
+for /f "tokens=1,*" %%i in ('findstr /b /c:"  python:" config\config.yaml') do set "PYTHON_CFG=%%j"
 
 set PYTHON_PATH=python
 if defined PYTHON_CFG set "PYTHON_PATH=%PYTHON_CFG:"=%"
