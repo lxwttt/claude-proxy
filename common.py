@@ -28,7 +28,6 @@ DEFAULT_HOST = '127.0.0.1'
 PORT_CHECK_TIMEOUT = 1.0          # 端口探测超时（秒）
 PORT_WAIT_INTERVAL = 0.5          # 端口轮询间隔（秒）
 PORT_WAIT_TIMEOUT = 30            # 端口等待超时（秒）
-DEFAULT_PORT_WAIT_TIMEOUT = PORT_WAIT_TIMEOUT  # 默认端口等待超时（秒）
 
 # 进程
 PROCESS_TERMINATE_TIMEOUT = 5     # terminate 后等待超时（秒）
@@ -164,7 +163,7 @@ def is_port_listening(port: int, host: str = DEFAULT_HOST) -> bool:
 
 def wait_for_port(
     port: int,
-    timeout: int = DEFAULT_PORT_WAIT_TIMEOUT,
+    timeout: int = PORT_WAIT_TIMEOUT,
     interval: float = PORT_WAIT_INTERVAL,
     label: str = '',
 ) -> bool:

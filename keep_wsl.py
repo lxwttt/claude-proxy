@@ -17,6 +17,7 @@ import subprocess
 from common import WSL_VERIFY_ATTEMPTS, WSL_VERIFY_INTERVAL
 
 logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())  # 库约定：未配置日志的调用方 import 时不向 stderr 喷日志
 
 # 本次运行中 WSL2 VM 是否由本程序拉起（启动前未运行）；决定退出时是否 --shutdown
 _self_started = False

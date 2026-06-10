@@ -23,13 +23,11 @@ from common import (
     start_process,
     setup_logging,
     validate_config_schema,
-    TIERS,
-    DEFAULT_TIER,
+    PORT_WAIT_TIMEOUT,
 )
 import keep_wsl
 
 # ========== 常量 ==========
-PORT_WAIT_TIMEOUT = 30
 HEALTH_CHECK_INTERVAL = 5      # 代理存活检查间隔（秒）
 PROXY_PORT_FAIL_LIMIT = 3      # 端口连续无响应多少次才判定代理失效（去抖，防瞬时抖动误杀）
 
@@ -162,7 +160,7 @@ class ClaudeLauncher:
                 logger.error(f"代理脚本不存在: {proxy_script}")
                 return False
 
-            logger.info(f"启动透明代理...")
+            logger.info(f"启动转发网关...")
             logger.info(f"   Python: {python_path}")
             logger.info(f"   脚本: {proxy_script}")
 
@@ -278,7 +276,7 @@ class ClaudeLauncher:
                 self._cleanup()
                 return False
 
-            # 5. 启动透明代理
+            # 5. 启动转发网关
             if not self.start_proxy():
                 self._cleanup()
                 return False
@@ -338,6 +336,7 @@ class ClaudeLauncher:
                         logger.critical(f"必选附加程序意外退出: {', '.join(dead)}！正在停止所有组件...")
                         _ok = False
                         break
+                    # 注意：TCP 探活只代表代理进程存活，不代表上游链路可用（上游全挂时代理仍 listen 并回 500）
                     # 端口无响应可能是瞬时抖动，需连续多次失败才判死，避免误杀
                     if is_port_listening(self.config['ports']['proxy_port']):
                         _port_fails = 0
