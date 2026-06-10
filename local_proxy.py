@@ -117,10 +117,14 @@ class SmartProxy(BaseHTTPRequestHandler):
         model_map = config.get("model_mapping", {})
 
         matched_tier = DEFAULT_TIER
+        matched = False
         for tier in TIERS:
             if tier in model_lower:
                 matched_tier = tier
+                matched = True
                 break
+        if not matched:
+            logger.warning(f"模型名 '{model_name}' 未识别 tier 关键字，降级为默认 {DEFAULT_TIER}")
 
         target_model = model_map.get(matched_tier, model_map.get(DEFAULT_TIER))
         if not target_model:
@@ -326,8 +330,8 @@ def keyboard_listener(server):
                 logger.warning("配置热更新失败，继续使用当前配置运行")
         elif cmd == 'q':
             logger.info("接收到退出指令，正在关闭服务器...")
-            server.shutdown()
-            sys.exit(0)
+            server.shutdown()  # 让主线程 serve_forever 返回而退出；子线程 sys.exit 无法终止进程
+            return
 
 
 def ensure_sole_instance(host, port):

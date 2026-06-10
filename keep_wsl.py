@@ -18,6 +18,9 @@ from common import WSL_VERIFY_ATTEMPTS, WSL_VERIFY_INTERVAL
 
 logger = logging.getLogger(__name__)
 
+# 本次运行中 WSL2 VM 是否由本程序拉起（启动前未运行）；决定退出时是否 --shutdown
+_self_started = False
+
 
 def _run_wsl(args, timeout, **kwargs):
     """统一执行 wsl 子命令。
@@ -69,10 +72,13 @@ def _ensure_wsl2_default() -> bool:
 
 def _ensure_wsl_distro_exists() -> bool:
     """检查 WSL 发行版是否已安装。"""
-    result = _run_wsl_safe(['-l', '-v'], timeout=10, capture_output=True, encoding='utf-8', errors='replace')
+    # wsl -l -v 输出为 UTF-16；显式指定编码，否则按 utf-8 解码得到夹 NUL 的乱码、行数判断失真
+    result = _run_wsl_safe(['-l', '-v'], timeout=10, capture_output=True, encoding='utf-16', errors='replace')
     if result is None:
         return False
-    if result.returncode == 0 and len(result.stdout.strip().split('\n')) <= 1:
+    # 首行为表头，其后每行一个发行版；按非空数据行数判断
+    lines = [ln for ln in result.stdout.splitlines() if ln.strip()]
+    if result.returncode == 0 and len(lines) <= 1:
         logger.error("未安装 WSL 发行版，VM 功能不可用。请手动运行: wsl --install -d Ubuntu")
         return False
     return True
@@ -131,8 +137,15 @@ def _verify_wsl_running() -> bool:
     return False
 
 
+def _is_wsl_running() -> bool:
+    """WSL 是否已有运行中的发行版（-q 仅输出发行版名，无则空），用于判断 VM 是否本程序拉起。"""
+    result = _run_wsl_safe(['-l', '--running', '-q'], timeout=10, capture_output=True, encoding='utf-16', errors='replace')
+    return bool(result and result.returncode == 0 and any(ln.strip() for ln in result.stdout.splitlines()))
+
+
 def ensure_wsl_running() -> bool:
     """确保 WSL2 VM 后台持续运行（Claude VM 沙盒的必要前提），仅 Windows 生效。"""
+    global _self_started
     if os.name != 'nt':
         return True
 
@@ -142,6 +155,8 @@ def ensure_wsl_running() -> bool:
         return False
     if not _ensure_wsl_distro_exists():
         return False
+    # 记录 VM 是否本程序拉起：启动前已在运行则退出时不 --shutdown（避免殃及用户其它发行版/工作）
+    _self_started = not _is_wsl_running()
     if not _start_wsl_keeper():
         return False
 
@@ -152,7 +167,11 @@ def ensure_wsl_running() -> bool:
 
 
 def stop_wsl_keeper():
-    """停止 WSL 后台 VM（VBS 启动的 sleep infinity 不是 Python 子进程，直接用 shutdown）。"""
+    """停止 WSL 后台 VM。仅当 VM 由本程序拉起（_self_started）时才 --shutdown；
+    否则保留（启动前用户已在用），避免越权关停整机 WSL2 殃及其它发行版/Docker。"""
+    if not _self_started:
+        logger.info("WSL 启动前已在运行，退出时不关停（避免影响用户其它发行版）")
+        return
     logger.info("停止 WSL VM...")
     if _run_wsl_safe(['--shutdown'], timeout=15, capture_output=True) is not None:
         logger.info("WSL VM 已停止")

@@ -42,6 +42,7 @@ class ExtraExeManager:
 
     def __init__(self):
         self.processes: List[subprocess.Popen] = []
+        self.required: List = []  # [(name, Popen)] 必选项，供主循环存活监控
 
     def start_extra_exes(self, extra_exes: List[Dict]) -> bool:
         """启动所有额外的EXE程序"""
@@ -84,6 +85,8 @@ class ExtraExeManager:
                 continue
 
             self.processes.append(process)
+            if required:
+                self.required.append((name, process))
             logger.info(f"{name} 启动成功 (PID: {process.pid})")
 
             if wait_port > 0:
@@ -99,12 +102,17 @@ class ExtraExeManager:
         logger.info("所有额外EXE程序启动完成")
         return True
 
+    def dead_required(self) -> List[str]:
+        """返回已退出的必选 EXE 名（poll() 非 None）。供主循环判定关键依赖是否失效。"""
+        return [name for name, proc in self.required if proc.poll() is not None]
+
     def stop_all(self):
         """停止所有启动的EXE程序"""
         logger.info("停止所有额外EXE程序...")
         for process in self.processes:
             terminate_process(process)
         self.processes.clear()
+        self.required.clear()
         logger.info("所有额外EXE程序已停止")
 
 
@@ -223,10 +231,13 @@ class ClaudeLauncher:
     # ------------------------------------------------------------------
 
     def _cleanup(self):
-        """清理所有资源：停止代理、WSL、额外EXE"""
-        self.stop_proxy()
-        keep_wsl.stop_wsl_keeper()
-        self.extra_exe_manager.stop_all()
+        """清理所有资源：停止代理、WSL、额外EXE。每步独立兜底（含 KeyboardInterrupt），
+        二次 Ctrl+C 或某步异常不影响其余步骤全部执行，确保不留孤儿进程。"""
+        for step in (self.stop_proxy, keep_wsl.stop_wsl_keeper, self.extra_exe_manager.stop_all):
+            try:
+                step()
+            except BaseException as e:
+                logger.warning(f"清理步骤 {getattr(step, '__name__', step)} 出错（已跳过继续）: {e}")
 
     def run(self):
         logger.info("=" * 50)
@@ -319,6 +330,12 @@ class ClaudeLauncher:
                     # 进程退出是确定信号，立即判定
                     if self.proxy_process and self.proxy_process.poll() is not None:
                         logger.critical("代理进程意外退出！正在停止所有组件...")
+                        _ok = False
+                        break
+                    # 必选附加程序（如 VPN）退出也是确定信号，立即判定
+                    dead = self.extra_exe_manager.dead_required()
+                    if dead:
+                        logger.critical(f"必选附加程序意外退出: {', '.join(dead)}！正在停止所有组件...")
                         _ok = False
                         break
                     # 端口无响应可能是瞬时抖动，需连续多次失败才判死，避免误杀
