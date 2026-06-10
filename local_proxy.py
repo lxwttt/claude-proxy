@@ -34,6 +34,7 @@ config_file_path = os.path.join(script_dir, "config", "model_config.yaml")
 DEBUG_MODE = False
 FULL_BODY_LOG = False  # debug 下是否记录完整响应体（关=仅记首少量字节，避免 SSE 日志爆炸）
 _config_lock = threading.Lock()
+_request_semaphore = threading.Semaphore(32)  # 有界并发：同时处理的 POST 上限，超限快速 503
 
 # ========== 日志系统（文件 + 控制台） ==========
 logger = setup_logging(
@@ -92,6 +93,10 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
 
 
 class SmartProxy(BaseHTTPRequestHandler):
+    timeout = 30  # 连接读超时：卡死/慢客户端被主动断开、释放线程（防 slowloris/线程泄漏）
+    disable_nagle_algorithm = True  # 开 TCP_NODELAY，降低流式小包延迟
+    DRAIN_CAP = 64 * 1024 * 1024  # 413 排空请求体上限（2× 体积上限，合法超限请求够读完）
+
     def log_message(self, format, *args):
         pass  # 关闭 http.server 自带混乱日志
 
@@ -178,8 +183,10 @@ class SmartProxy(BaseHTTPRequestHandler):
             logger.debug(f"[<<] 响应体(前{cap // 1024}KiB):\n{preview.decode('utf-8', errors='replace')}")
 
     def _drain_request_body(self, content_length):
-        """排空并丢弃客户端剩余请求体，避免未读体导致 TCP RST（客户端表现为 ECONNRESET）。"""
-        remaining = content_length
+        """排空客户端剩余请求体（避免未读体触发 RST→客户端见 ECONNRESET 而非 413）。
+        至多读 DRAIN_CAP 字节：合法超限请求(略超 32MiB)能读完得干净 413；恶意声明超大
+        Content-Length 时不被迫陪读到底（配合 timeout=30 兜底慢上传）。"""
+        remaining = min(content_length, self.DRAIN_CAP)
         try:
             while remaining > 0:
                 chunk = self.rfile.read(min(remaining, 1 << 20))  # 每次最多 1 MiB
@@ -190,6 +197,19 @@ class SmartProxy(BaseHTTPRequestHandler):
             logger.debug(f"排空请求体时出错（客户端可能已断开）: {e}")
 
     def do_POST(self):
+        # 有界并发：超过上限快速回 503，避免线程/内存被打爆
+        if not _request_semaphore.acquire(blocking=False):
+            self.send_response(503)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": "proxy busy"}).encode())
+            return
+        try:
+            self._handle_post()
+        finally:
+            _request_semaphore.release()
+
+    def _handle_post(self):
         """核心转发逻辑"""
         # 线程安全读取配置
         with _config_lock:
@@ -265,6 +285,8 @@ class SmartProxy(BaseHTTPRequestHandler):
                     logger.debug(f"[>>] 请求体: <{len(post_data)} 字节，过大已省略>")
                 else:
                     logger.debug(f"[>>] 请求体:\n{json.dumps(data, indent=2, ensure_ascii=False)}")
+
+            del post_data  # 提前释放原始请求体字节，减少与 data/new_body 的内存重叠
 
             headers = {
                 'Content-Type': 'application/json',
