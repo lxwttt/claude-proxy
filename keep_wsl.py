@@ -83,11 +83,14 @@ def _start_wsl_keeper() -> bool:
     # WSL.exe 是控制台子系统程序，会自建 ConPTY 窗口，Popen 的 creationflags 无法抑制
     # VBScript Run(..., 0, False) → 隐藏窗口 (0) + 不等待 (False)
     logger.info("保持 WSL VM 后台运行...")
+    vbs_content = 'CreateObject("WScript.Shell").Run "wsl -e sleep infinity", 0, False'
+    vbs_path = None
     try:
-        vbs_content = 'CreateObject("WScript.Shell").Run "wsl -e sleep infinity", 0, False'
-        vbs_path = os.path.join(tempfile.gettempdir(), '_claude_wsl_keeper.vbs')
-        with open(vbs_path, 'w') as f:
+        # O_EXCL + 随机名独占创建，避免固定可预测名被预创建/符号链接抢占替换
+        fd, vbs_path = tempfile.mkstemp(suffix='.vbs', prefix='_claude_wsl_keeper_')
+        with os.fdopen(fd, 'w') as f:
             f.write(vbs_content)
+        # subprocess.run 阻塞至 cscript 读完并退出（VBS 的 Run(...,False) 已异步拉起 wsl）
         subprocess.run(
             ['cscript.exe', '//NoLogo', '//B', vbs_path],
             stdout=subprocess.DEVNULL,
@@ -100,6 +103,12 @@ def _start_wsl_keeper() -> bool:
     except Exception as e:
         logger.warning(f"WSL keep-alive 启动失败: {e}")
         return False
+    finally:
+        if vbs_path:
+            try:
+                os.remove(vbs_path)
+            except OSError:
+                pass
 
 
 def _verify_wsl_running() -> bool:

@@ -10,7 +10,7 @@ import requests
 import logging
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
-from urllib.parse import urljoin
+from urllib.parse import urlparse
 from threading import Thread
 import sys
 import traceback
@@ -234,11 +234,24 @@ class SmartProxy(BaseHTTPRequestHandler):
             # --- effort 映射 ---
             self._apply_effort_mapping(data, matched_tier, _config, _debug)
 
-            # 构建目标 URL（确保 base_url 以 '/' 结尾，避免 urljoin 截断）
+            # 构建目标 URL：拒绝带 scheme/netloc 的 path（防 urljoin 逃逸到任意主机 → 密钥外泄/SSRF）
+            parsed_path = urlparse(self.path)
+            if parsed_path.scheme or parsed_path.netloc:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "Invalid request path"}).encode())
+                return
             base_url = _config.get("api_base_url", "")
-            if not base_url.endswith('/'):
-                base_url += '/'
-            target_url = urljoin(base_url, self.path.lstrip('/'))
+            # 显式拼接（不用 urljoin，杜绝 scheme/scheme-relative 逃逸），保留 query
+            target_url = base_url.rstrip('/') + '/' + self.path.lstrip('/')
+            # 复校：目标 host 必须等于配置 base_url 的 host，否则拒绝
+            if urlparse(target_url).netloc != urlparse(base_url).netloc:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "Upstream host mismatch"}).encode())
+                return
 
             # ===== Debug 日志（DEBUG_MODE=true 时才记录到文件） =====
             if _debug:
@@ -285,7 +298,8 @@ class SmartProxy(BaseHTTPRequestHandler):
                     self.send_response(500)
                     self.send_header('Content-Type', 'application/json')
                     self.end_headers()
-                    self.wfile.write(json.dumps({"error": str(e)}).encode())
+                    # 只回固定文案，详情已写日志，避免向客户端泄漏内部 target_url/堆栈
+                    self.wfile.write(json.dumps({"error": "internal proxy error"}).encode())
                 except Exception as send_err:
                     logger.debug(f"发送错误响应失败（客户端可能已断开）: {send_err}")
 
