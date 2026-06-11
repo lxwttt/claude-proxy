@@ -40,7 +40,7 @@ class ExtraExeManager:
 
     def __init__(self):
         self.processes: List[subprocess.Popen] = []
-        self.required: List = []  # [(name, Popen)] 必选项，供主循环存活监控
+        self.required: List = []  # [(name, Popen, wait_port)] 必选项，供主循环存活监控
 
     def start_extra_exes(self, extra_exes: List[Dict]) -> bool:
         """启动所有额外的EXE程序"""
@@ -84,7 +84,7 @@ class ExtraExeManager:
 
             self.processes.append(process)
             if required:
-                self.required.append((name, process))
+                self.required.append((name, process, wait_port))
             logger.info(f"{name} 启动成功 (PID: {process.pid})")
 
             if wait_port > 0:
@@ -101,8 +101,15 @@ class ExtraExeManager:
         return True
 
     def dead_required(self) -> List[str]:
-        """返回已退出的必选 EXE 名（poll() 非 None）。供主循环判定关键依赖是否失效。"""
-        return [name for name, proc in self.required if proc.poll() is not None]
+        """返回已失效的必选 EXE 名。判活信号取"程序真正提供的能力"：
+        声明了 wait_for_port 的以端口是否在监听为准——启动器型程序（如 WestWorldVPN：检测到 VPN
+        已在运行便只弹"已启动"窗口随即退出）句柄退出≠服务失效；未声明端口的才回退到进程 poll()。"""
+        dead = []
+        for name, proc, wait_port in self.required:
+            alive = is_port_listening(wait_port) if wait_port > 0 else proc.poll() is None
+            if not alive:
+                dead.append(name)
+        return dead
 
     def stop_all(self):
         """停止所有启动的EXE程序"""
@@ -330,10 +337,10 @@ class ClaudeLauncher:
                         logger.critical("代理进程意外退出！正在停止所有组件...")
                         _ok = False
                         break
-                    # 必选附加程序（如 VPN）退出也是确定信号，立即判定
+                    # 必选附加程序（如 VPN）以其服务端口判活，失效是确定信号，立即判定
                     dead = self.extra_exe_manager.dead_required()
                     if dead:
-                        logger.critical(f"必选附加程序意外退出: {', '.join(dead)}！正在停止所有组件...")
+                        logger.critical(f"必选附加程序服务失效: {', '.join(dead)}！正在停止所有组件...")
                         _ok = False
                         break
                     # 注意：TCP 探活只代表代理进程存活，不代表上游链路可用（上游全挂时代理仍 listen 并回 500）
