@@ -73,8 +73,9 @@ def _ensure_wsl2_default() -> bool:
 
 def _ensure_wsl_distro_exists() -> bool:
     """检查 WSL 发行版是否已安装。"""
-    # wsl -l -v 输出为 UTF-16；显式指定编码，否则按 utf-8 解码得到夹 NUL 的乱码、行数判断失真
-    result = _run_wsl_safe(['-l', '-v'], timeout=10, capture_output=True, encoding='utf-16', errors='replace')
+    # wsl -l -v 输出为无 BOM 的 UTF-16LE；必须用 utf-16-le 而非 utf-16（后者要求 BOM，否则读取线程
+    # 抛 UnicodeError 而死，subprocess 返回 returncode=0 但 stdout=None，下游 None.splitlines() 崩溃）
+    result = _run_wsl_safe(['-l', '-v'], timeout=10, capture_output=True, encoding='utf-16-le', errors='replace')
     if result is None:
         return False
     # 首行为表头，其后每行一个发行版；按非空数据行数判断
@@ -140,7 +141,7 @@ def _verify_wsl_running() -> bool:
 
 def _is_wsl_running() -> bool:
     """WSL 是否已有运行中的发行版（-q 仅输出发行版名，无则空），用于判断 VM 是否本程序拉起。"""
-    result = _run_wsl_safe(['-l', '--running', '-q'], timeout=10, capture_output=True, encoding='utf-16', errors='replace')
+    result = _run_wsl_safe(['-l', '--running', '-q'], timeout=10, capture_output=True, encoding='utf-16-le', errors='replace')
     return bool(result and result.returncode == 0 and any(ln.strip() for ln in result.stdout.splitlines()))
 
 
