@@ -16,6 +16,9 @@ import threading
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
+# 三个库模块已迁入 src/；launch.py 仍在仓库根，需把 src/ 加入模块搜索路径（与 tests/conftest.py 同款约定）
+sys.path.insert(0, str(Path(__file__).parent / "src"))
+
 from common import (
     is_port_listening,
     wait_for_port,

@@ -121,7 +121,8 @@ def setup_logging(
         file_fmt: 文件格式。
         clean_file: True 时文件日志去除 ANSI/emoji。
     """
-    log_dir = Path(__file__).parent / "logs"
+    # 模块在 src/ 下，logs/ 在项目根（src 上一级）：用 parent.parent 回锚，避免日志写进 src/logs
+    log_dir = Path(__file__).parent.parent / "logs"
     log_dir.mkdir(exist_ok=True)
     log_file = log_dir / f"{log_prefix}_{time.strftime('%Y%m%d')}.log"
 

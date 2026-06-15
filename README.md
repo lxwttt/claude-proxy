@@ -19,10 +19,10 @@ start_claude.cmd (Windows 入口)
         ├─ (0) 确保 WSL2 VM 后台运行 (Claude 沙盒需要)
         ├─ (1) 启动额外 EXE (VPN 等)，等待端口就绪
         ├─ (2) 设置 HTTP_PROXY / HTTPS_PROXY 环境变量
-        ├─ (3) 启动 local_proxy.py (API 转发代理，:8899)
+        ├─ (3) 启动 src/local_proxy.py (API 转发代理，:8899)
         └─ (4) 启动 Claude 桌面版
 
-local_proxy.py  (运行在 127.0.0.1:8899)
+src/local_proxy.py  (运行在 127.0.0.1:8899)
   ├─ 接收 Claude 的 API 请求
   ├─ 模型名称映射 (haiku/sonnet/opus → 目标模型)
   ├─ effort 映射 (按模型等级覆写 reasoning effort)
@@ -30,7 +30,7 @@ local_proxy.py  (运行在 127.0.0.1:8899)
   ├─ 流式透传响应到目标 API (DeepSeek Anthropic 兼容端点 / OpenAI)
   └─ 启动期端口独占 + 请求体上限/干净拒绝（单实例 & 抗 ECONNRESET）
 
-common.py  (共享工具模块)
+src/common.py  (共享工具模块)
   ├─ 统一日志配置（双输出 + 按日轮转 + 自动清理）
   ├─ 端口探测与等待
   ├─ 进程管理（启动、优雅终止、强制终止）
@@ -45,9 +45,9 @@ common.py  (共享工具模块)
 | 文件 | 用途 |
 |---|---|
 | `launch.py` | 主启动器 — 编排 WSL、VPN、代理、Claude 的启动顺序 |
-| `keep_wsl.py` | WSL2 VM 保活模块 — 已从 launch.py 解耦；由 launch.py 调用，也可 `python keep_wsl.py` 单独运行 |
-| `local_proxy.py` | API 转发代理 — HTTP 服务器，模型名映射 + effort 映射 + 流式转发 |
-| `common.py` | 共享工具模块 — 日志、端口检查、进程管理、常量 |
+| `src/keep_wsl.py` | WSL2 VM 保活模块 — 已从 launch.py 解耦；由 launch.py 调用，也可 `python src/keep_wsl.py` 单独运行 |
+| `src/local_proxy.py` | API 转发代理 — HTTP 服务器，模型名映射 + effort 映射 + 流式转发 |
+| `src/common.py` | 共享工具模块 — 日志、端口检查、进程管理、常量 |
 | `config/config.yaml` | 启动器配置 — Python 路径、端口、额外 EXE（从 `config/sample_config.yaml` 复制） |
 | `config/model_config.yaml` | API 转发配置 — 后端选择、API Key、模型映射、effort 映射（从 `config/sample_model_config.yaml` 复制） |
 | `start_claude.cmd` | Windows 批处理入口 — 校验环境后启动 `launch.py` |
@@ -71,7 +71,7 @@ pip install pyyaml requests
 ```yaml
 paths:
   python: "D:/anaconda3/python.exe"          # Python 可执行文件路径
-  proxy_script: "D:/claude-proxy/local_proxy.py"  # 转发代理脚本路径
+  proxy_script: "D:/claude-proxy/src/local_proxy.py"  # 转发代理脚本路径
   claude_exe: "..."                           # Claude EXE 路径（可选）
 
 ports:
@@ -97,7 +97,7 @@ extra_exes:
 **关键参数说明：**
 
 - `paths.python` — 改为你本机实际的 Python 路径
-- `paths.proxy_script` — 保持指向 `local_proxy.py` 即可
+- `paths.proxy_script` — 保持指向 `src/local_proxy.py` 即可
 - `extra_exes` — 填入需要预启动的代理软件。可配置多条；`required: true` 表示该程序必须启动成功，否则退出
 - `proxy_settings` — 设置后将注入 `HTTP_PROXY` 和 `HTTPS_PROXY` 环境变量，使 Claude 的请求经过此代理
 - 如果不需要启动额外 EXE，将 `extra_exes` 设为空列表 `[]`
@@ -231,7 +231,7 @@ python launch.py
 6. **启动 Claude** — 通过 App User Model ID 或 EXE 路径启动 Claude
 7. **保持运行** — 等待 Ctrl+C，逆序清理：停止转发代理 → 关闭 WSL VM → 停止额外 EXE
 
-### local_proxy.py — API 转发代理
+### src/local_proxy.py — API 转发代理
 
 一个轻量级多线程 HTTP 服务器（基于 `http.server` + `ThreadingMixIn`），运行在 `127.0.0.1:8899`：
 
@@ -269,7 +269,7 @@ python launch.py
 
 - 为什么重要：Windows 的 `SO_REUSEADDR` 会**允许两个进程共占同一端口**——旧代理残留时，新进程本会与其同时监听 `8899`、请求被随机分流，导致"改了代码重启却仍跑旧逻辑"的诡异现象。本项目已**显式 `allow_reuse_address = False`**（绑定被占端口会直接报错、fail-loud），再叠加 `ensure_sole_instance` 主动清理旧实例并复查端口，双重保证任何时刻 `8899` 上只有一个、且是最新代码的实例。
 
-### common.py — 共享工具模块
+### src/common.py — 共享工具模块
 
 `launch.py` 和 `local_proxy.py` 的公共依赖，提供：
 
@@ -292,7 +292,7 @@ python launch.py
 
 ### WSL2 VM 保活机制
 
-WSL2 保活逻辑独立在 **`keep_wsl.py`** 模块中（与"换 API 后端"正交，故从 launch.py 解耦；launch.py 启动时 `import keep_wsl` 调用，也可 `python keep_wsl.py` 单独运行只保活 WSL）。`wsl -e sleep infinity` 可以维持 VM 存活，但 `wsl.exe` 是控制台子系统程序，即使使用 `CREATE_NO_WINDOW` 也无法隐藏其窗口。解决方案：通过 VBScript 的 `WScript.Shell.Run(hidden)` 启动 WSL，再调用 `cscript.exe` 执行该 VBS。
+WSL2 保活逻辑独立在 **`keep_wsl.py`** 模块中（与"换 API 后端"正交，故从 launch.py 解耦；launch.py 启动时 `import keep_wsl` 调用，也可 `python src/keep_wsl.py` 单独运行只保活 WSL）。`wsl -e sleep infinity` 可以维持 VM 存活，但 `wsl.exe` 是控制台子系统程序，即使使用 `CREATE_NO_WINDOW` 也无法隐藏其窗口。解决方案：通过 VBScript 的 `WScript.Shell.Run(hidden)` 启动 WSL，再调用 `cscript.exe` 执行该 VBS。
 
 ### 指定 Claude 启动方式
 

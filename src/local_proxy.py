@@ -30,7 +30,8 @@ from common import (
 # ========== 全局变量 ==========
 current_config = {}
 script_dir = os.path.dirname(os.path.abspath(__file__))
-config_file_path = os.path.join(script_dir, "config", "model_config.yaml")
+# config/ 在项目根（src 上一级）：模块下沉到 src/ 后须回锚一层，否则会去 src/config 找配置
+config_file_path = os.path.join(os.path.dirname(script_dir), "config", "model_config.yaml")
 DEBUG_MODE = False
 FULL_BODY_LOG = False  # debug 下是否记录完整响应体（关=仅记首少量字节，避免 SSE 日志爆炸）
 _config_lock = threading.Lock()
