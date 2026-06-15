@@ -101,21 +101,26 @@ class SmartProxy(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass  # 关闭 http.server 自带混乱日志
 
+    def _send_json(self, status, payload):
+        """统一回写本代理自产的小 JSON 响应（探针/热加载/各类错误）。
+        客户端可能已断开 → 整体写入失败只记 debug 不外抛（原先仅 500 路径有此保护，
+        其余各处复制粘贴时漏了，集中到一处后行为统一）。
+        注意：上游流式响应不走这里，仍由 _stream_response_to_client 直传。"""
+        try:
+            self.send_response(status)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps(payload, ensure_ascii=False).encode())
+        except OSError as e:
+            logger.debug(f"回写 JSON 响应失败（客户端可能已断开）: {e}")
+
     def do_GET(self):
         """GET 探针 / 配置热加载"""
         if self.path == '/reload':
             ok = load_config()
-            self.send_response(200 if ok else 500)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps(
-                {"reload": "ok" if ok else "failed"}, ensure_ascii=False
-            ).encode())
+            self._send_json(200 if ok else 500, {"reload": "ok" if ok else "failed"})
             return
-        self.send_response(200)
-        self.send_header('Content-Type', 'application/json')
-        self.end_headers()
-        self.wfile.write(json.dumps({"status": "ok"}).encode())
+        self._send_json(200, {"status": "ok"})
 
     def _resolve_model(self, model_name, config):
         """从模型名提取 tier 关键字，返回 (tier, target_model)"""
@@ -200,10 +205,7 @@ class SmartProxy(BaseHTTPRequestHandler):
     def do_POST(self):
         # 有界并发：超过上限快速回 503，避免线程/内存被打爆
         if not _request_semaphore.acquire(blocking=False):
-            self.send_response(503)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps({"error": "proxy busy"}).encode())
+            self._send_json(503, {"error": "proxy busy"})
             return
         try:
             self._handle_post()
@@ -221,10 +223,7 @@ class SmartProxy(BaseHTTPRequestHandler):
         # 不支持 chunked 请求体：BaseHTTPRequestHandler 不解块，若当 0 字节读会静默丢正文，
         # 显式回 400 而非静默转发空体
         if 'chunked' in self.headers.get('Transfer-Encoding', '').lower():
-            self.send_response(400)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps({"error": "chunked request body not supported"}).encode())
+            self._send_json(400, {"error": "chunked request body not supported"})
             return
 
         # 请求体大小限制：先安全解析 Content-Length，畸形/负值回干净 400，
@@ -234,10 +233,7 @@ class SmartProxy(BaseHTTPRequestHandler):
             if content_length < 0:
                 raise ValueError('negative Content-Length')
         except (TypeError, ValueError):
-            self.send_response(400)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps({"error": "Invalid Content-Length"}).encode())
+            self._send_json(400, {"error": "Invalid Content-Length"})
             return
         if content_length > MAX_REQUEST_BODY_BYTES:
             # 先排空客户端仍在上传的请求体，否则"响应先于请求体读完"会触发 TCP RST，
@@ -248,10 +244,7 @@ class SmartProxy(BaseHTTPRequestHandler):
                 f"({content_length / 1024 / 1024:.2f} MiB) > 上限 "
                 f"{MAX_REQUEST_BODY_BYTES / 1024 / 1024:.0f} MiB"
             )
-            self.send_response(413)  # Payload Too Large
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps({"error": "Request body too large"}).encode())
+            self._send_json(413, {"error": "Request body too large"})  # Payload Too Large
             return
 
         post_data = self.rfile.read(content_length) if content_length > 0 else b'{}'
@@ -271,20 +264,14 @@ class SmartProxy(BaseHTTPRequestHandler):
             # 构建目标 URL：拒绝带 scheme/netloc 的 path（防 urljoin 逃逸到任意主机 → 密钥外泄/SSRF）
             parsed_path = urlparse(self.path)
             if parsed_path.scheme or parsed_path.netloc:
-                self.send_response(400)
-                self.send_header('Content-Type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps({"error": "Invalid request path"}).encode())
+                self._send_json(400, {"error": "Invalid request path"})
                 return
             base_url = _config.get("api_base_url", "")
             # 显式拼接（不用 urljoin，杜绝 scheme/scheme-relative 逃逸），保留 query
             target_url = base_url.rstrip('/') + '/' + self.path.lstrip('/')
             # 复校：目标 host 必须等于配置 base_url 的 host，否则拒绝
             if urlparse(target_url).netloc != urlparse(base_url).netloc:
-                self.send_response(400)
-                self.send_header('Content-Type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps({"error": "Upstream host mismatch"}).encode())
+                self._send_json(400, {"error": "Upstream host mismatch"})
                 return
 
             # ===== Debug 日志（DEBUG_MODE=true 时才记录到文件） =====
@@ -330,14 +317,9 @@ class SmartProxy(BaseHTTPRequestHandler):
                 # 响应头/流已开始，再发 500 会向已开始的 SSE 注入脏状态行，只记录不回写
                 logger.debug("响应已开始，跳过 500 回写")
             else:
-                try:
-                    self.send_response(500)
-                    self.send_header('Content-Type', 'application/json')
-                    self.end_headers()
-                    # 只回固定文案，详情已写日志，避免向客户端泄漏内部 target_url/堆栈
-                    self.wfile.write(json.dumps({"error": "internal proxy error"}).encode())
-                except Exception as send_err:
-                    logger.debug(f"发送错误响应失败（客户端可能已断开）: {send_err}")
+                # 只回固定文案，详情已写日志，避免向客户端泄漏内部 target_url/堆栈
+                # （_send_json 已内置断开保护，无需再裹 try）
+                self._send_json(500, {"error": "internal proxy error"})
 
 
 def keyboard_listener(server):
