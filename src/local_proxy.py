@@ -22,6 +22,8 @@ from common import (
     setup_logging,
     TIERS,
     DEFAULT_TIER,
+    DEFAULT_HOST,
+    DEFAULT_PROXY_PORT,
     MAX_REQUEST_BODY_BYTES,
     validate_config_schema,
     is_port_listening,
@@ -127,15 +129,10 @@ class SmartProxy(BaseHTTPRequestHandler):
         model_lower = model_name.lower()
         model_map = config.get("model_mapping", {})
 
-        matched_tier = DEFAULT_TIER
-        matched = False
-        for tier in TIERS:
-            if tier in model_lower:
-                matched_tier = tier
-                matched = True
-                break
-        if not matched:
+        matched_tier = next((tier for tier in TIERS if tier in model_lower), None)
+        if matched_tier is None:
             logger.warning(f"模型名 '{model_name}' 未识别 tier 关键字，降级为默认 {DEFAULT_TIER}")
+            matched_tier = DEFAULT_TIER
 
         target_model = model_map.get(matched_tier, model_map.get(DEFAULT_TIER))
         if not target_model:
@@ -218,7 +215,9 @@ class SmartProxy(BaseHTTPRequestHandler):
         with _config_lock:
             _debug = DEBUG_MODE
             _full_log = FULL_BODY_LOG
-            _config = dict(current_config)  # shallow copy for this request
+            # load_config 整体重绑 current_config（绝不原地改它），取引用即一致快照；
+            # 本函数也只读 _config 不写，故无需逐请求 dict() 拷贝
+            _config = current_config
 
         # 不支持 chunked 请求体：BaseHTTPRequestHandler 不解块，若当 0 字节读会静默丢正文，
         # 显式回 400 而非静默转发空体
@@ -395,12 +394,12 @@ if __name__ == '__main__':
         logger.critical("初始配置加载失败，程序退出")
         sys.exit(1)
 
-    # 端口单一事实来源：由 launch.py 以命令行参数传入（config.yaml ports.proxy_port）；独立运行默认 8899
+    # 端口单一事实来源：由 launch.py 以命令行参数传入（config.yaml ports.proxy_port）；独立运行回退默认
     try:
-        port = int(sys.argv[1]) if len(sys.argv) > 1 else 8899
+        port = int(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_PROXY_PORT
     except (ValueError, IndexError):
-        port = 8899
-    server_address = ('127.0.0.1', port)
+        port = DEFAULT_PROXY_PORT
+    server_address = (DEFAULT_HOST, port)
     ensure_sole_instance(*server_address)  # 抢占式清理旧实例，杜绝僵尸代理
     try:
         httpd = ThreadedHTTPServer(server_address, SmartProxy)
@@ -412,7 +411,7 @@ if __name__ == '__main__':
     listener_thread = Thread(target=keyboard_listener, args=(httpd,), daemon=True)
     listener_thread.start()
 
-    logger.info(f"代理已启动，监听 http://127.0.0.1:{port}")
+    logger.info(f"代理已启动，监听 http://{DEFAULT_HOST}:{port}")
     logger.info(f"按键指令 -> 'r' 重载配置 | 'q' 退出")
 
     try:

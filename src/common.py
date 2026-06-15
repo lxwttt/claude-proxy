@@ -25,6 +25,7 @@ DEFAULT_TIER = 'haiku'
 
 # 网络
 DEFAULT_HOST = '127.0.0.1'
+DEFAULT_PROXY_PORT = 8899          # 代理默认端口：独立运行且未传 argv 时的回退（launch.py 总是显式传入）
 PORT_CHECK_TIMEOUT = 1.0          # 端口探测超时（秒）
 PORT_WAIT_INTERVAL = 0.5          # 端口轮询间隔（秒）
 PORT_WAIT_TIMEOUT = 30            # 端口等待超时（秒）
