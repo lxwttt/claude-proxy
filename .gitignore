@@ -4,10 +4,12 @@ config/model_config.yaml
 
 *.log
 __pycache__/
+.pytest_cache/
 
 .codegraph/
 .vscode/
 .claude/
 .review-plan/
+speedtest/
 
 CLAUDE.MD
