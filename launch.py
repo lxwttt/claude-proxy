@@ -211,25 +211,21 @@ class ClaudeLauncher:
             app_id = self.config.get('app', {}).get('app_id')
             claude_exe = self.config.get('paths', {}).get('claude_exe')
 
+            # AppID 优先（走 explorer 的 shell:AppsFolder），否则直启 EXE；两路仅命令与日志不同
             if app_id:
-                logger.info(f"通过 AppID 启动 Claude: {app_id}")
-                proc = start_process(['explorer.exe', f'shell:AppsFolder\\{app_id}'], hide_window=True)
-                if proc is None:
-                    logger.error("Claude AppID 启动失败")
-                    return False
-                logger.info("Claude 已通过 AppID 启动")
-                return True
+                cmd, how = ['explorer.exe', f'shell:AppsFolder\\{app_id}'], f'AppID {app_id}'
             elif claude_exe and Path(claude_exe).exists():
-                logger.info(f"通过 EXE 启动 Claude: {claude_exe}")
-                proc = start_process([claude_exe], hide_window=True)
-                if proc is None:
-                    logger.error("Claude EXE 启动失败")
-                    return False
-                logger.info("Claude 已通过 EXE 启动")
-                return True
+                cmd, how = [claude_exe], f'EXE {claude_exe}'
             else:
                 logger.error("未找到有效的 Claude 启动方式")
                 return False
+
+            logger.info(f"通过 {how} 启动 Claude")
+            if start_process(cmd, hide_window=True) is None:
+                logger.error("Claude 启动失败")
+                return False
+            logger.info("Claude 已启动")
+            return True
         except Exception as e:
             logger.error(f"启动 Claude 失败: {e}")
             return False
@@ -322,7 +318,6 @@ class ClaudeLauncher:
         _reload_url = f"http://127.0.0.1:{self.config['ports']['proxy_port']}/reload"
         logger.info("   按 r 刷新代理配置 | 按 q 或 Ctrl+C 停止所有程序")
 
-        _ok = True
         _last_health = time.time()
         _port_fails = 0
         try:
@@ -341,25 +336,23 @@ class ClaudeLauncher:
                         except Exception as e:
                             logger.warning(f"[FAIL] 无法连接代理: {e}")
                     elif key == b'q':
-                        # 优雅退出：跳出主循环走 finally 清理，避免 Ctrl+C 触发 cmd 的
-                        # "Terminate batch job (Y/N)?" 提示（用户需多次按键才能退出）
+                        # 优雅退出：跳出主循环（循环外 return True），经 finally 清理；
+                        # 避免 Ctrl+C 触发 cmd 的 "Terminate batch job (Y/N)?"（用户需多次按键才能退出）
                         logger.info("收到退出指令 (q)，正在停止所有组件...")
                         break
 
-                # 定期检查代理存活
+                # 定期检查代理存活：任一致命信号 → 直接 return False，finally 仍会清理
                 if time.time() - _last_health >= HEALTH_CHECK_INTERVAL:
                     _last_health = time.time()
                     # 进程退出是确定信号，立即判定
                     if self.proxy_process and self.proxy_process.poll() is not None:
                         logger.critical("代理进程意外退出！正在停止所有组件...")
-                        _ok = False
-                        break
+                        return False
                     # 必选附加程序（如 VPN）以其服务端口判活，失效是确定信号，立即判定
                     dead = self.extra_exe_manager.dead_required()
                     if dead:
                         logger.critical(f"必选附加程序服务失效: {', '.join(dead)}！正在停止所有组件...")
-                        _ok = False
-                        break
+                        return False
                     # 注意：TCP 探活只代表代理进程存活，不代表上游链路可用（上游全挂时代理仍 listen 并回 500）
                     # 端口无响应可能是瞬时抖动，需连续多次失败才判死，避免误杀
                     if is_port_listening(self.config['ports']['proxy_port']):
@@ -369,17 +362,16 @@ class ClaudeLauncher:
                         logger.warning(f"代理端口无响应（{_port_fails}/{PROXY_PORT_FAIL_LIMIT}）...")
                         if _port_fails >= PROXY_PORT_FAIL_LIMIT:
                             logger.critical("代理端口连续无响应，正在停止所有组件...")
-                            _ok = False
-                            break
+                            return False
 
                 time.sleep(0.1)
         except KeyboardInterrupt:
             logger.info("\n收到中断信号...")
-            _ok = False
+            return False
         finally:
             self._cleanup()
 
-        return _ok
+        return True
 
 
 def main():
