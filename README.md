@@ -214,7 +214,7 @@ python launch.py
 
 ### 停止
 
-**通过 `launch.py` 运行时：** 在终端按 **Ctrl+C**，程序会自动按以下顺序清理：
+**通过 `launch.py` 运行时：** 在终端按 **`q`** 正常退出（或 **Ctrl+C**；用 `q` 可避免 cmd 弹出 `Terminate batch job (Y/N)?` 需多次按键的问题），程序会自动按以下顺序清理：
 1. 停止转发代理（`local_proxy.py` 子进程）
 2. 关闭 WSL VM（`wsl --shutdown`）
 3. 停止所有额外 EXE

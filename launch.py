@@ -271,6 +271,15 @@ class ClaudeLauncher:
             if not validate_config_schema(self.config, ('paths.python', 'paths.proxy_script', 'ports.proxy_port'), context='launcher'):
                 logger.warning("配置验证失败，但继续尝试启动")
 
+            # 2.5 代理子进程依赖 config/model_config.yaml；提前确认存在，否则代理会启动即退、
+            #      而 launcher 干等端口超时(30s)才报错。把这项检查从 start_claude.cmd 上移至此统一处理。
+            model_cfg = Path(__file__).parent / "config" / "model_config.yaml"
+            if not model_cfg.exists():
+                logger.error(f"模型配置不存在: {model_cfg}")
+                logger.error("    请复制 config/sample_model_config.yaml 为 config/model_config.yaml 并填写")
+                self._cleanup()
+                return False
+
             # 3. 设置代理环境变量
             if self.config.get('proxy_settings', {}).get('enabled', False):
                 os.environ['HTTP_PROXY'] = self.config['proxy_settings']['http_proxy']
@@ -306,12 +315,12 @@ class ClaudeLauncher:
 
         logger.info("=" * 50)
         logger.info("所有组件已成功启动！")
-        logger.info("   按 Ctrl+C 停止所有程序")
+        logger.info("   按 q 或 Ctrl+C 停止所有程序")
         logger.info("=" * 50)
 
         # 主循环：轮询按键 + 响应 Ctrl+C + 子进程存活监控
         _reload_url = f"http://127.0.0.1:{self.config['ports']['proxy_port']}/reload"
-        logger.info("   按 r 刷新代理配置 | 按 Ctrl+C 停止所有程序")
+        logger.info("   按 r 刷新代理配置 | 按 q 或 Ctrl+C 停止所有程序")
 
         _ok = True
         _last_health = time.time()
@@ -331,6 +340,11 @@ class ClaudeLauncher:
                                 logger.warning("[FAIL] 代理配置刷新失败")
                         except Exception as e:
                             logger.warning(f"[FAIL] 无法连接代理: {e}")
+                    elif key == b'q':
+                        # 优雅退出：跳出主循环走 finally 清理，避免 Ctrl+C 触发 cmd 的
+                        # "Terminate batch job (Y/N)?" 提示（用户需多次按键才能退出）
+                        logger.info("收到退出指令 (q)，正在停止所有组件...")
+                        break
 
                 # 定期检查代理存活
                 if time.time() - _last_health >= HEALTH_CHECK_INTERVAL:

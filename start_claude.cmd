@@ -8,73 +8,49 @@ echo ============================================
 
 cd /d "%~dp0"
 
-REM ===== 1. 检查必需文件 =====
-if not exist "config\config.yaml" (
-    echo.
-    echo [!!] config\config.yaml 不存在
-    echo     请复制 config\sample_config.yaml 为 config\config.yaml 并修改配置
-    echo.
-    pause
-    exit /b 1
-)
+REM ===== Resolve which Python to run launch.py with =====
+REM This is the only job the .cmd must do itself: you need a Python to start launch.py.
+REM Everything else (config / model_config existence, required fields) is left to launch.py.
+REM This file is intentionally pure ASCII: cmd.exe parses .cmd in the system OEM codepage,
+REM so any non-ASCII text here would be mis-decoded and corrupt the script on some machines.
+REM Tolerant parse: any indentation, optional quotes, trailing # comment, forward/back slashes.
+set "PYTHON_PATH=python"
+for /f "tokens=1,* delims=:" %%a in ('findstr /r /c:"^ *python *:" "config\config.yaml" 2^>nul') do call :set_python %%b
+set "PYTHON_PATH=%PYTHON_PATH:/=\%"
+goto :python_resolved
 
-if not exist "config\model_config.yaml" (
+:set_python
+REM %~1 strips surrounding quotes and leading spaces; an inline # comment falls into later args
+if not "%~1"=="" set "PYTHON_PATH=%~1"
+goto :eof
+
+:python_resolved
+
+REM ===== Only validate that Python itself runs (config contents are checked by launch.py) =====
+"%PYTHON_PATH%" --version >nul 2>&1
+if errorlevel 1 (
     echo.
-    echo [!!] config\model_config.yaml 不存在
-    echo     请复制 config\sample_model_config.yaml 为 config\model_config.yaml 并修改配置
+    echo [!!] Python not available: %PYTHON_PATH%
+    echo     Check paths.python in config\config.yaml ^(absolute path, quotes recommended^)
     echo.
-    pause
-    exit /b 1
-)
-
-if not exist "launch.py" (
-    echo.
-    echo [!!] launch.py 不存在
-    pause
-    exit /b 1
-)
-
-REM ===== 2. 从 config.yaml 提取 Python 路径 =====
-set PYTHON_CFG=
-for /f "tokens=1,*" %%i in ('findstr /b /c:"  python:" config\config.yaml') do set "PYTHON_CFG=%%j"
-
-set PYTHON_PATH=python
-if defined PYTHON_CFG set "PYTHON_PATH=%PYTHON_CFG:"=%"
-
-REM ===== 3. 校验 Python 可执行 =====
-set PYTHON_OK=0
-if "%PYTHON_PATH%"=="python" (
-    python --version >nul 2>&1 && set PYTHON_OK=1
-) else (
-    if exist "%PYTHON_PATH%" (
-        "%PYTHON_PATH%" --version >nul 2>&1 && set PYTHON_OK=1
-    )
-)
-
-if %PYTHON_OK%==0 (
-    echo.
-    echo [!!] Python 不可用: %PYTHON_PATH%
-    echo     请检查 config\config.yaml 中的 python 路径配置
     pause
     exit /b 1
 )
 
 echo.
 echo [..] Python: %PYTHON_PATH%
-echo [..] 正在启动 Claude 自动启动器...
+echo [..] Starting... press q in this window to quit cleanly ^(Ctrl+C also works^)
 echo.
 
-REM ===== 4. 启动 launch.py =====
-%PYTHON_PATH% launch.py
-set LAUNCH_EXIT=%errorlevel%
+REM ===== Start launch.py (missing config / bad fields are reported by launch.py itself) =====
+"%PYTHON_PATH%" launch.py
+set "LAUNCH_EXIT=%errorlevel%"
 
-if %LAUNCH_EXIT%==0 (
+if "%LAUNCH_EXIT%"=="0" (
     echo.
-    echo [OK] 所有组件正常退出
-    echo     日志: logs\ 目录
+    echo [OK] All components exited normally. See logs\ directory.
 ) else (
     echo.
-    echo [!!] 程序异常退出 (错误码: %LAUNCH_EXIT%)
-    echo     请检查上方信息或查看 logs 目录
+    echo [!!] Exited with code %LAUNCH_EXIT%. See logs\ directory.
 )
 pause
