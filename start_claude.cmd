@@ -38,6 +38,7 @@ if errorlevel 1 (
 )
 
 echo.
+echo [..] Logs: %~dp0logs\
 echo [..] Python: %PYTHON_PATH%
 echo [..] Starting... press q in this window to quit cleanly ^(Ctrl+C also works^)
 echo.
@@ -53,4 +54,3 @@ if "%LAUNCH_EXIT%"=="0" (
     echo.
     echo [!!] Exited with code %LAUNCH_EXIT%. See logs\ directory.
 )
-pause
