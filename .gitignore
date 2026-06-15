@@ -5,6 +5,8 @@ config/model_config.yaml
 *.log
 __pycache__/
 .pytest_cache/
+# pytest.ini 设置近 pytest 默认值，作为本地测试配置不入库（缺失时裸 pytest 仍可跑全部用例）
+pytest.ini
 
 .codegraph/
 .vscode/

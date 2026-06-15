@@ -53,15 +53,19 @@ src/common.py  (共享工具模块)
 | `start_claude.cmd` | Windows 批处理入口 — 校验环境后启动 `launch.py` |
 | `config/sample_config.yaml` | 启动器配置模板 |
 | `config/sample_model_config.yaml` | 模型配置模板 |
+| `tests/` | pytest 单元测试套件（`python -m pytest` 运行） |
+| `requirements.txt` | 运行依赖（`requests`、`PyYAML`） |
+| `requirements-dev.txt` | 开发/测试依赖（运行依赖 + `pytest`） |
 
 ## 前置条件
 
 - Windows 系统（依赖 `subprocess.CREATE_NO_WINDOW` 等 Windows API）
 - Python 3（建议 Anaconda 或其他发行版）
-- Python 包：`pyyaml`、`requests`
+- Python 依赖见 `requirements.txt`（运行：`requests`、`PyYAML`）；跑测试再装 `requirements-dev.txt`（含 `pytest`）
 
 ```bash
-pip install pyyaml requests
+pip install -r requirements.txt        # 运行依赖
+pip install -r requirements-dev.txt    # 开发/测试依赖（含 pytest）
 ```
 
 ## 配置方法
@@ -216,6 +220,15 @@ python launch.py
 3. 停止所有额外 EXE
 
 **单独运行 `local_proxy.py` 时：** 按 `q` 退出。
+
+## 测试
+
+```bash
+pip install -r requirements-dev.txt   # 安装含 pytest 的开发依赖
+python -m pytest                      # 从仓库根运行，自动发现 tests/ 下全部用例
+```
+
+`tests/` 下为 pytest 单元测试（模型解析、effort 映射、配置加载、请求体限制、流式透传等）。`tests/conftest.py` 会把 `src/` 加入模块搜索路径，故测试可直接 `import common / local_proxy / keep_wsl`。本地的 `pytest.ini` 仅设置近 pytest 默认值且**不入库**，缺失时裸 `pytest` 亦可正常收集运行。
 
 ## 详细组件说明
 
