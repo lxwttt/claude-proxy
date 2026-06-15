@@ -124,7 +124,12 @@ def _verify_wsl_running() -> bool:
     除 KeyboardInterrupt 外不抛异常——其余错误降级为 warning 并返回 False（让真正的中断能传播到上层清理）。"""
     for attempt in range(WSL_VERIFY_ATTEMPTS):
         try:
-            verify = _run_wsl(['-l', '--running'], capture_output=True, timeout=10)
+            # 只看 returncode（不需要输出），故用 DEVNULL 而非 capture_output：WSL 冷启动时
+            # wsl.exe 会派生存活子进程并继承 stdout 管道句柄，若走 capture_output，run() 超时
+            # kill 后的善后 communicate()（无超时）会被这条管道拖住、阻塞远超 10s（实测曾卡 ~59s）；
+            # DEVNULL 无管道可拖，timeout 即能准时生效。
+            verify = _run_wsl(['-l', '--running'], stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, timeout=10)
         except Exception as e:
             logger.warning(f"WSL 状态查询失败（{attempt + 1}/{WSL_VERIFY_ATTEMPTS}）: {e}")
             time.sleep(WSL_VERIFY_INTERVAL)
