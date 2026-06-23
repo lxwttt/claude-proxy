@@ -175,7 +175,10 @@ class SmartProxy(BaseHTTPRequestHandler):
             self._send_json(200 if ok else 500,
                             {"reload": "ok" if ok else "failed", "setting": setting})
             return
-        self._send_json(200, {"status": "ok"})
+        # 默认探针顺带回传当前生效 profile，供 launch 端口就绪后回显（与 /reload 对称、但不触发重载）
+        with _config_lock:
+            setting = current_setting_name
+        self._send_json(200, {"status": "ok", "setting": setting})
 
     def _resolve_model(self, model_name, config):
         """从模型名提取 tier，按映射返回 (tier, target_model)（api_key 模式用）"""

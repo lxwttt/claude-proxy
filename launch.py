@@ -191,6 +191,17 @@ class ClaudeLauncher:
                 self.stop_proxy()
                 return False
 
+            # 代理子进程日志被重定向到独立文件，控制台看不到其加载的 profile；
+            # 端口就绪后查一次探针回显（与按 r 热更新的回显对称，旧代理无此字段则降级无名）
+            setting = ""
+            try:
+                resp = requests.get(f"http://127.0.0.1:{proxy_port}/", timeout=5,
+                                    proxies={'http': None, 'https': None})
+                setting = resp.json().get("setting", "")
+            except Exception:
+                pass
+            logger.info(f"   转发网关已就绪{f'（当前配置: {setting}）' if setting else ''}")
+
             return True
 
         except Exception as e:
