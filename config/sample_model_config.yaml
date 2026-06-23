@@ -31,3 +31,13 @@ settings:
   #     haiku: "high"
   #     sonnet: "xhigh"
   #     opus: "max"
+
+  # ===== OAuth（订阅凭证）模式：直连官方 api.anthropic.com，复用 Claude 订阅额度，无需第三方 Key =====
+  # 注意：用订阅 token 驱动非 Claude Code 客户端属于绕过官方预期用法，有触发风控/封号风险，自行权衡。
+  # Subscription:
+  #   name: "Subscription"
+  #   auth_mode: "oauth"          # 关键：切到订阅 OAuth；缺省为 api_key
+  #   debug_mode: false
+  #   # api_base_url 可省，默认 https://api.anthropic.com
+  #   # credentials_path 可省，默认 ~/.claude/.credentials.json（Claude Code 后台轮换 token）
+  #   # model_mapping 可省 → 透传 Claude 原始型号名；effort_mapping 与 api_key 模式一致可选

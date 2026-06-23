@@ -31,6 +31,7 @@ from common import (
 
 # ========== 全局变量 ==========
 current_config = {}
+current_setting_name = ""  # 当前生效的 profile 名（model_config.yaml 的 current_setting），供 /reload 回显
 script_dir = os.path.dirname(os.path.abspath(__file__))
 # config/ 在项目根（src 上一级）：模块下沉到 src/ 后须回锚一层，否则会去 src/config 找配置
 config_file_path = os.path.join(os.path.dirname(script_dir), "config", "model_config.yaml")
@@ -38,6 +39,15 @@ DEBUG_MODE = False
 FULL_BODY_LOG = False  # debug 下是否记录完整响应体（关=仅记首少量字节，避免 SSE 日志爆炸）
 _config_lock = threading.Lock()
 _request_semaphore = threading.Semaphore(32)  # 有界并发：同时处理的 POST 上限，超限快速 503
+
+# ========== OAuth（订阅凭证）认证模式常量 ==========
+# 订阅 OAuth token 仅授权给 Claude Code：官方按 system 首块的这段身份文本放行，缺失即被拒。
+CLAUDE_CODE_SYSTEM = "You are Claude Code, Anthropic's official CLI for Claude."
+ANTHROPIC_VERSION = "2023-06-01"
+OAUTH_BETA = "oauth-2025-04-20"
+DEFAULT_OAUTH_BASE_URL = "https://api.anthropic.com"  # oauth 模式未配 api_base_url 时的默认上游
+# Claude Code 在 Windows 下把凭证写到此处，并在后台轮换 accessToken
+DEFAULT_CREDENTIALS_PATH = os.path.join(os.path.expanduser("~"), ".claude", ".credentials.json")
 
 # ========== 日志系统（文件 + 控制台） ==========
 logger = setup_logging(
@@ -51,7 +61,7 @@ logger = setup_logging(
 
 def load_config():
     """从 YAML 文件加载配置，并提取 debug_mode"""
-    global current_config, DEBUG_MODE, FULL_BODY_LOG
+    global current_config, current_setting_name, DEBUG_MODE, FULL_BODY_LOG
     try:
         with open(config_file_path, 'r', encoding='utf-8') as f:
             all_configs = yaml.safe_load(f)
@@ -63,28 +73,68 @@ def load_config():
             logger.error(f"未找到名为 '{current_env_name}' 的环境设置")
             return False
 
-        # 配置模式验证
-        if not validate_config_schema(
-            env_config,
-            ('api_base_url', 'api_key', 'model_mapping'),
-            context=f'env:{current_env_name}',
-        ):
+        # 配置模式验证：oauth 模式 base_url/凭证/模型均有默认或透传，无强制字段；
+        # api_key 模式仍需 base_url + key + 映射三件套
+        auth_mode = env_config.get("auth_mode", "api_key")
+        if auth_mode not in ("api_key", "oauth"):
+            logger.error(f"配置 '{current_env_name}' auth_mode 非法: {auth_mode!r}（应为 api_key / oauth）")
+            return False
+        required = () if auth_mode == "oauth" else ('api_base_url', 'api_key', 'model_mapping')
+        if required and not validate_config_schema(env_config, required, context=f'env:{current_env_name}'):
             logger.error(f"配置 '{current_env_name}' 缺少必要字段，加载失败")
             return False
 
         with _config_lock:
             current_config = env_config
+            current_setting_name = current_env_name
             DEBUG_MODE = current_config.get("debug_mode", False)
             FULL_BODY_LOG = current_config.get("full_body_log", False)
-            base_url = current_config.get('api_base_url', '')
+            base_url = current_config.get('api_base_url') or (DEFAULT_OAUTH_BASE_URL if auth_mode == "oauth" else '')
 
-        logger.info(f"配置 '{current_env_name}' 加载成功 (BaseURL: {base_url})")
+        logger.info(f"配置 '{current_env_name}' 加载成功 (模式: {auth_mode}, BaseURL: {base_url})")
         logger.info(f"Debug模式: {'ON' if DEBUG_MODE else 'OFF'}"
                     f"{'（全量响应体）' if (DEBUG_MODE and FULL_BODY_LOG) else ''}")
         return True
     except Exception as e:
         logger.error(f"读取配置文件错误: {e}")
         return False
+
+
+class OAuthCredentialError(Exception):
+    """订阅凭证缺失/损坏/过期：可预期的运维状况，给出清晰刷新提示，不当内部错误(500)处理。"""
+
+
+def load_oauth_token(credentials_path):
+    """读取 Claude 订阅 OAuth accessToken 并校验未过期。
+
+    凭证由 Claude Code 后台轮换写盘、token 短时有效——故每请求按需读盘取最新值，
+    不缓存、不自行续签；过期/缺失则抛 OAuthCredentialError 提示打开 Claude Code 刷新。
+    """
+    try:
+        with open(credentials_path, "r", encoding="utf-8") as f:
+            oauth = (json.load(f) or {}).get("claudeAiOauth") or {}
+    except FileNotFoundError:
+        raise OAuthCredentialError(
+            f"未找到凭证文件 {credentials_path} — 先登录 Claude Code 生成订阅凭证")
+    except (OSError, json.JSONDecodeError) as e:
+        raise OAuthCredentialError(f"读取凭证文件失败 {credentials_path}: {e}")
+    token = oauth.get("accessToken")
+    if not token:
+        raise OAuthCredentialError(f"凭证文件缺少 claudeAiOauth.accessToken: {credentials_path}")
+    # expiresAt 为 unix 毫秒；留 60s 余量，避免临界 token 在流式途中失效
+    expires_at = oauth.get("expiresAt")
+    if expires_at is not None and expires_at <= (time.time() + 60) * 1000:
+        raise OAuthCredentialError("OAuth token 已过期 — 打开 Claude Code 一次以刷新 .credentials.json")
+    return token
+
+
+def _extract_tier(model_name):
+    """从模型名提取 tier 关键字（无匹配则降级默认并告警）。api_key/oauth 两模式共用。"""
+    matched_tier = next((tier for tier in TIERS if tier in model_name.lower()), None)
+    if matched_tier is None:
+        logger.warning(f"模型名 '{model_name}' 未识别 tier 关键字，降级为默认 {DEFAULT_TIER}")
+        matched_tier = DEFAULT_TIER
+    return matched_tier
 
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
@@ -120,24 +170,58 @@ class SmartProxy(BaseHTTPRequestHandler):
         """GET 探针 / 配置热加载"""
         if self.path == '/reload':
             ok = load_config()
-            self._send_json(200 if ok else 500, {"reload": "ok" if ok else "failed"})
+            with _config_lock:
+                setting = current_setting_name
+            self._send_json(200 if ok else 500,
+                            {"reload": "ok" if ok else "failed", "setting": setting})
             return
         self._send_json(200, {"status": "ok"})
 
     def _resolve_model(self, model_name, config):
-        """从模型名提取 tier 关键字，返回 (tier, target_model)"""
-        model_lower = model_name.lower()
+        """从模型名提取 tier，按映射返回 (tier, target_model)（api_key 模式用）"""
+        matched_tier = _extract_tier(model_name)
         model_map = config.get("model_mapping", {})
-
-        matched_tier = next((tier for tier in TIERS if tier in model_lower), None)
-        if matched_tier is None:
-            logger.warning(f"模型名 '{model_name}' 未识别 tier 关键字，降级为默认 {DEFAULT_TIER}")
-            matched_tier = DEFAULT_TIER
-
         target_model = model_map.get(matched_tier, model_map.get(DEFAULT_TIER))
         if not target_model:
             raise ValueError(f"未找到型号 '{matched_tier}' 的映射规则")
         return matched_tier, target_model
+
+    def _inject_claude_code_system(self, data):
+        """oauth 模式：把 Claude Code 身份块置于 system 数组首位（订阅 token 放行的前提）。
+
+        原 system 原样保留在身份块之后：缺失→新建；字符串→转 text 块续上；数组→前插。
+        已以身份块开头则不重复注入。"""
+        cc_block = {"type": "text", "text": CLAUDE_CODE_SYSTEM}
+        system = data.get("system")
+        if system is None:
+            data["system"] = [cc_block]
+        elif isinstance(system, str):
+            data["system"] = [cc_block, {"type": "text", "text": system}]
+        elif isinstance(system, list):
+            first = system[0] if system else None
+            if isinstance(first, dict) and first.get("text") == CLAUDE_CODE_SYSTEM:
+                return  # 已注入，避免重复
+            data["system"] = [cc_block] + system
+        else:
+            data["system"] = [cc_block]  # 非预期类型兜底：至少保证可被官方接受
+
+    def _build_headers(self, config):
+        """按 auth_mode 构造转发头。两模式都禁用上游压缩（避免缺 brotli 时流中途解码截断 SSE）。"""
+        if config.get("auth_mode", "api_key") == "oauth":
+            creds_path = config.get("credentials_path") or DEFAULT_CREDENTIALS_PATH
+            token = load_oauth_token(creds_path)  # 过期/缺失抛 OAuthCredentialError，上层转 401
+            return {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {token}",
+                "anthropic-version": ANTHROPIC_VERSION,
+                "anthropic-beta": OAUTH_BETA,
+                "Accept-Encoding": "identity",
+            }
+        return {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {config.get('api_key')}",
+            "Accept-Encoding": "identity",
+        }
 
     def _apply_effort_mapping(self, data, tier, config, debug):
         """effort 映射：仅在原请求已包含 output_config 时覆盖"""
@@ -252,12 +336,17 @@ class SmartProxy(BaseHTTPRequestHandler):
         try:
             data = json.loads(post_data.decode('utf-8'))
             original_model = data.get("model", "")
+            auth_mode = _config.get("auth_mode", "api_key")
 
-            # --- 模型映射 ---
-            matched_tier, target_model = self._resolve_model(original_model, _config)
-            data["model"] = target_model
+            # --- 模型处理：oauth 直打官方、透传原模型名 + 注入 Claude Code 身份块；
+            #     api_key 模式按 model_mapping 改写为第三方型号 ---
+            if auth_mode == "oauth":
+                matched_tier = _extract_tier(original_model)
+                self._inject_claude_code_system(data)
+            else:
+                matched_tier, data["model"] = self._resolve_model(original_model, _config)
 
-            # --- effort 映射 ---
+            # --- effort 映射（两模式一致：仅当原请求含 output_config 时条件覆写）---
             self._apply_effort_mapping(data, matched_tier, _config, _debug)
 
             # 构建目标 URL：拒绝带 scheme/netloc 的 path（防 urljoin 逃逸到任意主机 → 密钥外泄/SSRF）
@@ -265,7 +354,8 @@ class SmartProxy(BaseHTTPRequestHandler):
             if parsed_path.scheme or parsed_path.netloc:
                 self._send_json(400, {"error": "Invalid request path"})
                 return
-            base_url = _config.get("api_base_url", "")
+            # oauth 模式默认官方端点；api_key 模式必须由配置给出
+            base_url = _config.get("api_base_url") or (DEFAULT_OAUTH_BASE_URL if auth_mode == "oauth" else "")
             # 显式拼接（不用 urljoin，杜绝 scheme/scheme-relative 逃逸），保留 query
             target_url = base_url.rstrip('/') + '/' + self.path.lstrip('/')
             # 复校：目标 host 必须等于配置 base_url 的 host，否则拒绝
@@ -276,7 +366,7 @@ class SmartProxy(BaseHTTPRequestHandler):
             # ===== Debug 日志（DEBUG_MODE=true 时才记录到文件） =====
             if _debug:
                 logger.debug(f"[>>] 收到请求: {self.path}")
-                logger.debug(f"[>>] 模型转换: {original_model} -> {target_model}")
+                logger.debug(f"[>>] 模型: {original_model} -> {data.get('model', original_model)} ({auth_mode})")
                 if len(post_data) > (1 << 20):
                     logger.debug(f"[>>] 请求体: <{len(post_data)} 字节，过大已省略>")
                 else:
@@ -284,12 +374,8 @@ class SmartProxy(BaseHTTPRequestHandler):
 
             del post_data  # 提前释放原始请求体字节，减少与 data/new_body 的内存重叠
 
-            headers = {
-                'Content-Type': 'application/json',
-                'Authorization': f'Bearer {_config.get("api_key")}',
-                # 禁用上游压缩：避免运行环境缺 brotli 时流中途解码失败截断 SSE，也省去解码缓冲
-                'Accept-Encoding': 'identity',
-            }
+            # 按 auth_mode 构造转发头（oauth 读订阅凭证；过期/缺失抛 OAuthCredentialError → 401）
+            headers = self._build_headers(_config)
 
             # 转发请求（流式）
             response = self._forward_request(data, target_url, headers)
@@ -308,6 +394,11 @@ class SmartProxy(BaseHTTPRequestHandler):
             self.end_headers()
             self._stream_response_to_client(response, _debug, _full_log)
 
+        except OAuthCredentialError as e:
+            # 订阅凭证缺失/过期：可预期运维状况，清晰提示刷新，不打 traceback、不当 500
+            logger.warning(f"[oauth] {e}")
+            if not response_started:
+                self._send_json(401, {"error": str(e)})
         except Exception as e:
             tb = traceback.format_exc()
             # error 级别：同时写入文件和控制台

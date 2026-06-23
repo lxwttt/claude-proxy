@@ -330,7 +330,13 @@ class ClaudeLauncher:
                             resp = requests.get(_reload_url, timeout=5,
                                                 proxies={'http': None, 'https': None})
                             if resp.status_code == 200:
-                                logger.info("[OK] 代理配置已刷新")
+                                # 回显当前生效的 profile 名（旧代理无此字段则降级为无名提示）
+                                setting = ""
+                                try:
+                                    setting = resp.json().get("setting", "")
+                                except Exception:
+                                    pass
+                                logger.info(f"[OK] 代理配置已刷新{f': {setting}' if setting else ''}")
                             else:
                                 logger.warning("[FAIL] 代理配置刷新失败")
                         except Exception as e:

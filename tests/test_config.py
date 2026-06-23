@@ -37,6 +37,8 @@ def _load(tmp_path, monkeypatch, text):
 
 def test_load_config_ok(tmp_path, monkeypatch):
     assert _load(tmp_path, monkeypatch, _GOOD) is True
+    # 成功加载后记录当前 profile 名，供 /reload 回显
+    assert local_proxy.current_setting_name == "X"
 
 
 def test_load_config_missing_env(tmp_path, monkeypatch):

@@ -49,7 +49,7 @@ src/common.py  (共享工具模块)
 | `src/local_proxy.py` | API 转发代理 — HTTP 服务器，模型名映射 + effort 映射 + 流式转发 |
 | `src/common.py` | 共享工具模块 — 日志、端口检查、进程管理、常量 |
 | `config/config.yaml` | 启动器配置 — Python 路径、端口、额外 EXE（从 `config/sample_config.yaml` 复制） |
-| `config/model_config.yaml` | API 转发配置 — 后端选择、API Key、模型映射、effort 映射（从 `config/sample_model_config.yaml` 复制） |
+| `config/model_config.yaml` | API 转发配置 — 后端选择、认证模式（api_key / oauth 订阅凭证）、模型映射、effort 映射（从 `config/sample_model_config.yaml` 复制） |
 | `start_claude.cmd` | Windows 批处理入口 — 校验环境后启动 `launch.py` |
 | `config/sample_config.yaml` | 启动器配置模板 |
 | `config/sample_model_config.yaml` | 模型配置模板 |
@@ -150,6 +150,30 @@ effort_mapping:
 ```
 
 如果原请求没有 `output_config`，则跳过 effort 映射，不做任何修改。
+
+**认证模式（`auth_mode`）：**
+
+每套配置可选 `auth_mode`，缺省为 `api_key`（即上面的第三方 Key 转发模式）。另一种是 `oauth` —— 直连官方 `api.anthropic.com`，复用本机 Claude Code 的**订阅 OAuth 凭证**，无需第三方 API Key：
+
+```yaml
+current_setting: "Subscription"
+
+settings:
+  Subscription:
+    name: "Subscription"
+    auth_mode: "oauth"          # 关键：切到订阅 OAuth 模式
+    debug_mode: false
+    # api_base_url 可省，默认 https://api.anthropic.com
+    # credentials_path 可省，默认 ~/.claude/.credentials.json（Claude Code 后台轮换 token）
+    # model_mapping 可省 → 透传 Claude 原始型号名；effort_mapping 与 api_key 模式一致可选
+```
+
+- **凭证来源**：每请求按需读 `~/.claude/.credentials.json` 的 `claudeAiOauth.accessToken`，永远取最新轮换值，不缓存。
+- **token 过期**：检测到过期（或临界 60s）直接回 `401` 并在日志提示「打开 Claude Code 一次以刷新」—— 代理不自行续签。
+- **模型透传**：oauth 模式默认不改写模型名，直接把 Claude 客户端发来的型号打给官方；如需省额度仍可配 `model_mapping`。
+- **请求体注入**：订阅 token 仅对 Claude Code 放行，代理会自动把 `You are Claude Code, Anthropic's official CLI for Claude.` 作为 `system` 首块注入（原 system 原样保留在其后）。
+
+> ⚠️ 用订阅凭证驱动非 Claude Code 客户端属于绕过官方预期用法，**存在触发风控/封号的风险**，请自行权衡。
 
 **热切换：**
 
