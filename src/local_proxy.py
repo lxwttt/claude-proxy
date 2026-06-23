@@ -100,6 +100,66 @@ def load_config():
         return False
 
 
+def rotate_config():
+    """轮换到 model_config.yaml 的下一个 setting，写回 current_setting 后热加载"""
+    try:
+        with open(config_file_path, 'r', encoding='utf-8') as f:
+            raw = f.read()
+
+        all_configs = yaml.safe_load(raw)
+        settings = all_configs.get("settings", {})
+        if not settings:
+            msg = "轮换失败：配置文件中没有 settings"
+            logger.error(msg)
+            print(msg)
+            return False
+
+        setting_names = list(settings.keys())
+        if len(setting_names) <= 1:
+            msg = f"只有一个配置 '{setting_names[0]}'，无需轮换"
+            logger.info(msg)
+            print(msg)
+            return True
+
+        current = all_configs.get("current_setting", "")
+        try:
+            idx = setting_names.index(current)
+            next_idx = (idx + 1) % len(setting_names)
+        except ValueError:
+            next_idx = 0
+
+        next_name = setting_names[next_idx]
+
+        # 行替换保留注释/格式，比 yaml.dump 更安全
+        lines = raw.splitlines(True)
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith('current_setting:'):
+                indent = line[:len(line) - len(line.lstrip())]
+                lines[i] = f'{indent}current_setting: "{next_name}"\n'
+                break
+
+        with open(config_file_path, 'w', encoding='utf-8') as f:
+            f.write(''.join(lines))
+
+        logger.info(f"current_setting: '{current}' → '{next_name}'，正在重新加载...")
+        if load_config():
+            msg = f"轮换成功，当前配置: {next_name}"
+            logger.warning(msg)
+            print(msg)
+            return True
+        else:
+            msg = f"轮换后加载配置 '{next_name}' 失败"
+            logger.error(msg)
+            print(msg)
+            return False
+    except Exception as e:
+        msg = f"轮换配置失败: {e}"
+        logger.error(msg)
+        print(msg)
+        return False
+
+
 class OAuthCredentialError(Exception):
     """订阅凭证缺失/损坏/过期：可预期的运维状况，给出清晰刷新提示，不当内部错误(500)处理。"""
 
@@ -167,13 +227,20 @@ class SmartProxy(BaseHTTPRequestHandler):
             logger.debug(f"回写 JSON 响应失败（客户端可能已断开）: {e}")
 
     def do_GET(self):
-        """GET 探针 / 配置热加载"""
+        """GET 探针 / 配置热加载 / 配置轮换"""
         if self.path == '/reload':
             ok = load_config()
             with _config_lock:
                 setting = current_setting_name
             self._send_json(200 if ok else 500,
                             {"reload": "ok" if ok else "failed", "setting": setting})
+            return
+        if self.path == '/rotate':
+            ok = rotate_config()
+            with _config_lock:
+                setting = current_setting_name
+            self._send_json(200 if ok else 500,
+                            {"rotate": "ok" if ok else "failed", "setting": setting})
             return
         # 默认探针顺带回传当前生效 profile，供 launch 端口就绪后回显（与 /reload 对称、但不触发重载）
         with _config_lock:
@@ -430,13 +497,15 @@ def keyboard_listener(server):
         except Exception:
             break
         if cmd == 'r':
-            logger.info("正在重新加载配置...")
+            print("正在重新加载配置...")
             if load_config():
                 logger.warning("配置热更新成功")
             else:
                 logger.warning("配置热更新失败，继续使用当前配置运行")
+        elif cmd == 'n':
+            rotate_config()
         elif cmd == 'q':
-            logger.info("接收到退出指令，正在关闭服务器...")
+            print("接收到退出指令，正在关闭服务器...")
             server.shutdown()  # 让主线程 serve_forever 返回而退出；子线程 sys.exit 无法终止进程
             return
 
@@ -506,7 +575,7 @@ if __name__ == '__main__':
     listener_thread.start()
 
     logger.info(f"代理已启动，监听 http://{DEFAULT_HOST}:{port}")
-    logger.info(f"按键指令 -> 'r' 重载配置 | 'q' 退出")
+    print(f"按键指令 -> 'r' 重载配置 | 'n' 下一个配置 | 'q' 退出")
 
     try:
         httpd.serve_forever()

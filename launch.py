@@ -327,7 +327,8 @@ class ClaudeLauncher:
 
         # 主循环：轮询按键 + 响应 Ctrl+C + 子进程存活监控
         _reload_url = f"http://127.0.0.1:{self.config['ports']['proxy_port']}/reload"
-        logger.info("   按 r 刷新代理配置 | 按 q 或 Ctrl+C 停止所有程序")
+        _rotate_url = f"http://127.0.0.1:{self.config['ports']['proxy_port']}/rotate"
+        logger.info("   按 r 刷新代理配置 | n 下一个配置 | q 或 Ctrl+C 停止所有程序")
 
         _last_health = time.time()
         _port_fails = 0
@@ -350,6 +351,22 @@ class ClaudeLauncher:
                                 logger.info(f"[OK] 代理配置已刷新{f': {setting}' if setting else ''}")
                             else:
                                 logger.warning("[FAIL] 代理配置刷新失败")
+                        except Exception as e:
+                            logger.warning(f"[FAIL] 无法连接代理: {e}")
+                    elif key == b'n':
+                        logger.info("正在轮换代理配置...")
+                        try:
+                            resp = requests.get(_rotate_url, timeout=5,
+                                                proxies={'http': None, 'https': None})
+                            if resp.status_code == 200:
+                                setting = ""
+                                try:
+                                    setting = resp.json().get("setting", "")
+                                except Exception:
+                                    pass
+                                logger.info(f"[OK] 已轮换到下一个配置{f': {setting}' if setting else ''}")
+                            else:
+                                logger.warning("[FAIL] 代理配置轮换失败")
                         except Exception as e:
                             logger.warning(f"[FAIL] 无法连接代理: {e}")
                     elif key == b'q':
