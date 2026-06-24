@@ -1,0 +1,6 @@
+# 订阅配置(含节点信息)
+in/input.yaml
+
+# 测速输出/派生文件
+out/
+result_*.md
