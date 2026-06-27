@@ -4,3 +4,6 @@ in/input.yaml
 # 测速输出/派生文件
 out/
 result_*.md
+
+# 机器私有配置(含 Clash Verge 安装/订阅路径、网卡名)；模板 config/sample_local.psd1 入库
+config/local.psd1

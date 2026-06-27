@@ -24,8 +24,20 @@ $OutHandshake = "$OutDir\result_handshake.txt"   # 阶段1: fast 握手探活原
 $OutLatency = "$OutDir\result_latency.txt"     # 阶段2: 真实消息结果(merge 以此为延迟)
 $OutDownload = "$OutDir\result_download.txt"
 
+# ================= 加载配置 =================
+# 机器私有(Clash Verge 安装/订阅/网卡, 不入库; 见 config\sample_local.psd1) + 测试参数(可入库)
+$MachineCfgFile = "$PSScriptRoot\config\local.psd1"
+$TestCfgFile = "$PSScriptRoot\config\test.psd1"
+if (-not (Test-Path $MachineCfgFile)) {
+    throw "缺少机器私有配置 $MachineCfgFile - 复制 config\sample_local.psd1 为 config\local.psd1 并填写本机路径"
+}
+if (-not (Test-Path $TestCfgFile)) { throw "缺少测试配置 $TestCfgFile" }
+$Machine = Import-PowerShellDataFile $MachineCfgFile
+$Tunables = Import-PowerShellDataFile $TestCfgFile
+
 # ================= 同步订阅: 每次测速前从 Verge 当前 profile 刷新 input.yaml =================
-$ProfileSource = "$env:APPDATA\io.github.clash-verge-rev.clash-verge-rev\profiles\RlbasAQdQ4q5.yaml"
+# VergeProfile 在 local.psd1 用 %APPDATA% 等环境变量记录, 这里展开为绝对路径
+$ProfileSource = [Environment]::ExpandEnvironmentVariables($Machine.VergeProfile)
 if (Test-Path $ProfileSource) {
     Copy-Item $ProfileSource $InputFile -Force
     Write-Host "Synced input.yaml <- Verge profile ($(Split-Path $ProfileSource -Leaf))" -ForegroundColor DarkGray
@@ -45,43 +57,43 @@ if ($Reset) {
     Write-Host "[-Reset $Reset] 已删原始结果文件" -ForegroundColor Yellow
 }
 
-# ================= 延迟测试配置 =================
+# ================= 延迟测试配置 (值见 config\test.psd1) =================
 # 阶段1 握手探活: fast 模式对 server-url 发 6 次 HEAD 取延迟, 任意 HTTP 状态码均计入。
 # 必须带路径: 裸域名会被当作测速服务器模式拼 /__down, 实测全部 N/A。
 # 探活通过 != 真实可用(沪港线曾按 TLS 指纹掐 OpenSSL/Schannel 内层握手而 Go 探活全绿),
 # 因此存活节点还要过阶段2 真实消息测试, 以其首字节延迟作为最终延迟
-$HandshakeUrl = "https://api.anthropic.com/v1/models"
+$HandshakeUrl = $Tunables.HandshakeUrl
 
 # 阶段2 真实消息: 官方 OAuth 格式流式 /v1/messages, stream 下首字节时间 ≈ 首 token 延迟。
 # 订阅 OAuth 必须: Bearer + anthropic-beta: oauth-2025-04-20 + Claude Code 系统提示词首块
 $CredFile = "$env:USERPROFILE\.claude\.credentials.json"
-$Mihomo = "D:\Program Files\Clash Verge\verge-mihomo.exe"
-$MixedPort = 18897    # 隔离端口, 不碰线上 Verge 的 7897/9097
-$CtrlPort = 18898
-$ApiUrl = "https://api.anthropic.com/v1/messages"
-$Model = "claude-haiku-4-5"
-$MaxTokens = 16
+$Mihomo = [Environment]::ExpandEnvironmentVariables($Machine.MihomoExe)  # 机器私有: Clash Verge 安装位置
+$MixedPort = $Tunables.MixedPort    # 隔离端口, 不碰线上 Verge 的 7897/9097
+$CtrlPort = $Tunables.CtrlPort
+$ApiUrl = $Tunables.ApiUrl
+$Model = $Tunables.Model
+$MaxTokens = $Tunables.MaxTokens
 $MsgSamples = $Samples # 每节点采样次数(由 -Samples 控制)
 # 429 限流(账号级: 整测共用一个 OAuth token, 切节点不重置额度): 退避重试 + 自适应降频
-$Max429Retry = 3    # 单次探测遇 429 的最大延时重试次数
-$Backoff429Base = 5    # 退避基数秒(指数 5→10→20)
-$Backoff429Max = 30   # 单次退避上限秒
-$ProbeDelayMs = 300  # 探测间隔基线(自适应起点)
-$PaceStep = 500  # AIMD: 遇 429 探测间隔的增量(ms)
-$PaceMax = 3000 # 探测间隔上限(ms)
+$Max429Retry = $Tunables.Max429Retry    # 单次探测遇 429 的最大延时重试次数
+$Backoff429Base = $Tunables.Backoff429Base    # 退避基数秒(指数 5→10→20)
+$Backoff429Max = $Tunables.Backoff429Max   # 单次退避上限秒
+$ProbeDelayMs = $Tunables.ProbeDelayMs  # 探测间隔基线(自适应起点)
+$PaceStep = $Tunables.PaceStep  # AIMD: 遇 429 探测间隔的增量(ms)
+$PaceMax = $Tunables.PaceMax # 探测间隔上限(ms)
 # 指标拆分: 排名用"网络延迟"(time_appconnect = 端到端 TLS 建链, 纯路径耗时, 取最小值
 # 滤掉服务端排队毛刺); 首token(TTFB)与服务端耗时(TTFB-建链)取中位数仅作参考列。
 # 不用 总耗时/token: 逐 token 生成速度是 Anthropic 服务端属性, 节点不可控, 会稀释节点信号
 
-# ================= 下载测试配置 =================
-$DownloadUrl = "https://downloads.claude.ai/vms/linux/x64/c9b42670eaedf20c7035b018c904a0c6a3cb864f/rootfs.vhdx.zst"
-$DownloadSize = 104857600
-$Timeout = "30s"
-$Concurrent = 4
+# ================= 下载测试配置 (值见 config\test.psd1) =================
+$DownloadUrl = $Tunables.DownloadUrl
+$DownloadSize = $Tunables.DownloadSize
+$Timeout = $Tunables.Timeout
+$Concurrent = $Tunables.Concurrent
 
 # 本机 Clash Verge TUN(Meta 网卡, 默认路由 metric 0)会把测速流量劫持进自己的隧道,
-# 节点必须绑定物理网卡直连出站; 置空则不注入
-$OutboundInterface = "WLAN"
+# 节点必须绑定物理网卡直连出站; 置空则不注入。机器私有(网卡名因机而异), 见 config\local.psd1
+$OutboundInterface = $Machine.OutboundInterface
 
 # ================= Self-check =================
 if (-not (Get-Command clash-speedtest -ErrorAction SilentlyContinue)) {
