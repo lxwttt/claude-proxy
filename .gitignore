@@ -7,9 +7,14 @@ __pycache__/
 .pytest_cache/
 # pytest.ini 设置近 pytest 默认值，作为本地测试配置不入库（缺失时裸 pytest 仍可跑全部用例）
 pytest.ini
+tools/
 
 .codegraph/
 .vscode/
 .claude/
 .review-plan/
-CLAUDE.MD
+CLAUDE.md
+
+# 知识图谱 / 待办（机器本地，与 CLAUDE.md 同策，不入库）
+docs/
+TODO.md
