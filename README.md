@@ -18,6 +18,11 @@
 # 编辑 api_sources.yaml（含 API Key，已 gitignore，需自行创建）
 # 然后同步到各项目：
 .\sync_api_sources.ps1 -Apply
+
+# 查询某个源实际提供哪些模型（更新 api_sources.yaml 前先探一遍）：
+.\probe_models.ps1 -Source gtw                        # 从 api_sources.yaml 读源
+.\probe_models.ps1 -Source gtw -Test                  # 实测每个模型 anthropic/openai 端点是否可用
+.\probe_models.ps1 -BaseUrl https://api.x.com -ApiKey sk-xxx   # 或手动指定
 ```
 
 ### 2. 启动代理
