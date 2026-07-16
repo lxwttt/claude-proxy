@@ -14,9 +14,8 @@
 
 ```powershell
 ds                 # 切到 DeepSeek Relay
+gpt                # 切到 GPT-5.6 Sol (Codex 订阅, 需先跑仓根 start_cliproxy.ps1)
 qwen-qoder         # 切到 Qwen3.7-Max (Qoder)
-ds-qoder           # 切到 DeepSeek-V4 (Qoder)
-glm-qoder          # 切到 GLM-5.2 (Qoder)
 opus               # 切到 Anthropic Official (OAuth)
 
 claude-status      # 查看当前状态

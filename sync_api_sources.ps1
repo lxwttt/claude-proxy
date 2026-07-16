@@ -7,8 +7,11 @@
 
   规则:
     - haiku → family 中 tier=low 模型 (不加后缀)
-    - sonnet/opus/subagent → family 中 tier=high 模型 (尾部加 "[1m]")
+    - sonnet/opus → family 中 tier=high 模型
+    - CLAUDE_CODE_SUBAGENT_MODEL 仅当 model_override.subagent 显式给出才写入 env JSON (默认不设)
+    - "[1m]" 后缀仅当该模型登记 max_context ≥ 1M 时追加 (Claude Code 无后缀默认按 200K 上下文)
     - provider 设了 model_override 则覆盖自动检测
+    - provider 可选 env: 键值对原样并入该 provider 的 env JSON (后写覆盖同名默认键)
 
   用法:
     .\sync_api_sources.ps1              # 预览变更 (WhatIf)
@@ -82,23 +85,14 @@ function Get-ProviderModels {
 }
 
 # ============================================================
-# 生成 claude-switch env JSON
+# 模型上下文后缀: 仅当该模型登记 max_context ≥ 1M 才声明 "[1m]"
+# (Claude Code 对无后缀模型默认按 200K 上下文)
 # ============================================================
-function New-ClaudeSwitchEnv {
-    param($Source, $HighModel, $LowModel, $Effort)
-
-    $env = @{
-        ANTHROPIC_BASE_URL            = $Source.base_url
-        ANTHROPIC_AUTH_TOKEN          = $Source.api_key
-        ANTHROPIC_MODEL               = "$HighModel[1m]"
-        ANTHROPIC_DEFAULT_OPUS_MODEL    = "$HighModel[1m]"
-        ANTHROPIC_DEFAULT_SONNET_MODEL  = "$HighModel[1m]"
-        ANTHROPIC_DEFAULT_HAIKU_MODEL   = $LowModel
-        CLAUDE_CODE_SUBAGENT_MODEL    = "$HighModel[1m]"
-        CLAUDE_CODE_EFFORT_LEVEL      = $Effort
-    }
-
-    return @{ env = $env } | ConvertTo-Json -Depth 4
+function Get-ModelSuffix {
+    param([array]$Models, [string]$ModelId)
+    $m = $Models | Where-Object { $_.id -eq $ModelId } | Select-Object -First 1
+    if ($m -and $m.max_context -ge 1000000) { return "[1m]" }
+    return ""
 }
 
 # ============================================================
@@ -178,7 +172,8 @@ foreach ($provProp in $Data.providers.PSObject.Properties) {
     $highModel = if ($override -and $override.opus)    { $override.opus }    else { Select-Model $models "high" }
     $lowModel  = if ($override -and $override.haiku)   { $override.haiku }   else { Select-Model $models "low" }
     $sonnetModel = if ($override -and $override.sonnet) { $override.sonnet } else { $highModel }
-    $subagentModel = if ($override -and $override.subagent) { $override.subagent } else { $highModel }
+    # subagent 不设默认: 仅显式 override 才下发 (未设时 Claude Code 按自身逻辑选)
+    $subagentModel = if ($override -and $override.subagent) { $override.subagent } else { $null }
 
     if (-not $highModel -or -not $lowModel) {
         Write-Warning "  模型选择失败 (high=$highModel, low=$lowModel)，跳过"; continue
@@ -187,19 +182,29 @@ foreach ($provProp in $Data.providers.PSObject.Properties) {
     $effort = if ($prov.effort) { $prov.effort } else { "max" }
 
     # 预览模型选择
-    Write-Host "    haiku=$lowModel  sonnet=$sonnetModel  opus=$highModel  subagent=$subagentModel  effort=$effort" -ForegroundColor DarkGray
+    $subagentLabel = if ($subagentModel) { $subagentModel } else { "(不设)" }
+    Write-Host "    haiku=$lowModel  sonnet=$sonnetModel  opus=$highModel  subagent=$subagentLabel  effort=$effort" -ForegroundColor DarkGray
 
     # claude-switch env JSON (仅当 target 包含 claude_switch)
     if ($toEnv) {
+        $highSfx     = Get-ModelSuffix $models $highModel
+        $sonnetSfx   = Get-ModelSuffix $models $sonnetModel
         $envData = @{
             ANTHROPIC_BASE_URL             = $srcObj.base_url
             ANTHROPIC_AUTH_TOKEN           = $srcObj.api_key
-            ANTHROPIC_MODEL                = "$highModel[1m]"
-            ANTHROPIC_DEFAULT_OPUS_MODEL   = "$highModel[1m]"
-            ANTHROPIC_DEFAULT_SONNET_MODEL = "$sonnetModel[1m]"
+            ANTHROPIC_MODEL                = "$highModel$highSfx"
+            ANTHROPIC_DEFAULT_OPUS_MODEL   = "$highModel$highSfx"
+            ANTHROPIC_DEFAULT_SONNET_MODEL = "$sonnetModel$sonnetSfx"
             ANTHROPIC_DEFAULT_HAIKU_MODEL  = $lowModel
-            CLAUDE_CODE_SUBAGENT_MODEL     = "$subagentModel[1m]"
             CLAUDE_CODE_EFFORT_LEVEL       = $effort
+        }
+        if ($subagentModel) {
+            $subagentSfx = Get-ModelSuffix $models $subagentModel
+            $envData.CLAUDE_CODE_SUBAGENT_MODEL = "$subagentModel$subagentSfx"
+        }
+        # provider 级额外 env 原样并入 (后写覆盖同名默认键)
+        if ($prov.env) {
+            foreach ($extra in $prov.env.PSObject.Properties) { $envData[$extra.Name] = "$($extra.Value)" }
         }
         $envJson = @{ env = $envData } | ConvertTo-Json -Depth 4
         $envPath = Join-Path $ClaudeEnvsDir "$alias.json"

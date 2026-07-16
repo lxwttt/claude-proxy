@@ -45,6 +45,7 @@ python claude-proxy\launch.py
 ```powershell
 . claude-switch\claude-switch.ps1    # dot-source 加载
 ds                                   # 切到 DeepSeek
+gpt                                  # 切到 GPT-5.6 Sol (Codex 订阅, 需先 .\start_cliproxy.ps1)
 qwen-qoder                           # 切到 Qwen (Qoder)
 claude-status                        # 查看当前
 ```
