@@ -9,7 +9,11 @@
 #   .\probe_models.ps1 -Source gtw -Test -Model glm-5,kimi-k2.5   # 只测指定模型
 #   .\probe_models.ps1 -BaseUrl https://api.x.com -ApiKey sk-xxx
 #   .\probe_models.ps1 -Source arkvoice -Raw            # 输出原始 JSON（看 context window 等扩展字段）
+#   .\probe_models.ps1 -Source qoder-proxy -Context     # 提取每个模型的 context/token 上限字段（供 api_sources 精确登记）
 #
+# -Context: 从 model-list 每个模型对象里抽取上下文/token 上限字段（见 $CtxInputKeys/$CtxOutputKeys），
+#   多数 OpenAI /v1/models 只回 id 不带这些字段 → 明确报「此源不返回 context 字段」。仅富接口
+#   （如 QoderCN model/list 的 max_input_tokens）才有值，届时可直接据此填 api_sources.yaml。
 # 端点候选: base 带路径(如 /api/v3、/anthropic)先直拼、再补 /v1；裸 host 反序。失败则试下一个。
 # -Test 判定（max_tokens=8 最小请求，会产生极少量真实计费）:
 #   anthropic = POST …/messages 返回 type=message；openai = POST …/chat/completions 返回 choices。
@@ -21,9 +25,15 @@ param(
     [string]$BaseUrl,
     [string]$ApiKey,
     [switch]$Raw,
+    [switch]$Context,
     [switch]$Test,
     [string[]]$Model
 )
+
+# model 对象里「输入上下文上限」/「输出上限」的候选字段名（跨后端方言并集，按优先级）
+$CtxInputKeys  = @('max_input_tokens', 'context_window', 'context_length', 'max_context',
+                   'input_token_limit', 'max_context_length', 'context_size')
+$CtxOutputKeys = @('max_output_tokens', 'output_token_limit', 'max_output', 'max_tokens')
 
 $ErrorActionPreference = 'Stop'
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -90,6 +100,35 @@ if (-not $models) { throw "No model list at any of: $($candidates -join ', ')" }
 
 if ($Raw) {
     $resp | ConvertTo-Json -Depth 10
+    return
+}
+
+# 从一个 model 对象里按候选键并集抽取首个存在的数值字段
+function Get-FirstField($obj, [string[]]$keys) {
+    foreach ($k in $keys) {
+        $v = $obj.$k
+        if ($null -ne $v -and "$v" -ne '') { return $v }
+    }
+    return $null
+}
+
+if ($Context) {
+    $rows = $models | ForEach-Object {
+        [pscustomobject]@{
+            id         = $_.id
+            ctx_input  = Get-FirstField $_ $CtxInputKeys
+            max_output = Get-FirstField $_ $CtxOutputKeys
+            status     = $_.status
+        }
+    } | Sort-Object id
+    $rows | Format-Table -AutoSize
+    $withCtx = @($rows | Where-Object { $null -ne $_.ctx_input -or $null -ne $_.max_output })
+    if ($withCtx.Count -eq 0) {
+        Write-Host "此源 model-list 不返回 context/token 字段（仅 id 等）；上下文长度须查各模型官方文档。" -ForegroundColor Yellow
+    } else {
+        Write-Host "$($withCtx.Count)/$($rows.Count) 个模型带 context/token 字段 — 可据此精确登记 api_sources.yaml。" -ForegroundColor Green
+    }
+    Write-Host "Total: $($models.Count) models" -ForegroundColor Green
     return
 }
 
